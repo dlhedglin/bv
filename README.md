@@ -2,6 +2,10 @@
 
 > A terminal viewer for [beans](https://github.com/hmans/beans) issues, across every repo at once.
 
+[![check](https://github.com/dlhedglin/bv/actions/workflows/check.yml/badge.svg)](https://github.com/dlhedglin/bv/actions/workflows/check.yml)
+[![security](https://github.com/dlhedglin/bv/actions/workflows/security.yml/badge.svg)](https://github.com/dlhedglin/bv/actions/workflows/security.yml)
+[![coverage](https://img.shields.io/endpoint?url=https%3A%2F%2Fraw.githubusercontent.com%2Fdlhedglin%2Fbv%2Fbadges%2Fcoverage.json)](https://github.com/dlhedglin/bv/actions/workflows/coverage.yml)
+
 `beans tui` searches upward for a single `.beans.yml`, so it only ever shows one
 project. bv addresses projects explicitly and puts a whole directory of repos on
 one screen — as a folding tree or a kanban board — and shows which Claude Code

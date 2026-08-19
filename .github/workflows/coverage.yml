@@ -1,0 +1,70 @@
+# Coverage badge, self-contained -- the shape bv-l0zp preferred: no third-party
+# service and no upload token. The suite runs under coverage on every push to
+# main, the line percentage is rendered into a shields.io endpoint JSON, and
+# that JSON is force-pushed to a one-commit `badges` branch the README badge
+# reads. The badge object lives in the repo, so it needs no account and keeps
+# working whatever happens to external services.
+#
+# main only: the badge states main's coverage, and a PR cannot be allowed to
+# write the badge branch anyway. No `fail_under` here -- bv-l0zp calls a
+# threshold its own decision, deliberately not smuggled in beside a badge.
+
+name: coverage
+
+on:
+  push:
+    branches: [main]
+
+concurrency:
+  group: coverage-main
+  cancel-in-progress: true
+
+# Writes the `badges` branch with the default token. If the repository's
+# Actions setting is read-only this push fails and the setting has to be flipped
+# to read/write once; everything else here needs only read.
+permissions:
+  contents: write
+
+jobs:
+  coverage:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v10.0.1
+        with:
+          python-version: "3.13"
+          enable-cache: true
+
+      - name: Measure coverage
+        run: make coverage ARGS="--cov-report=xml"
+
+      - name: Publish the coverage badge
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          pct=$(uv run python -c "import xml.etree.ElementTree as ET; print(round(float(ET.parse('coverage.xml').getroot().get('line-rate')) * 100))")
+          if   [ "$pct" -ge 90 ]; then color=brightgreen
+          elif [ "$pct" -ge 80 ]; then color=green
+          elif [ "$pct" -ge 70 ]; then color=yellowgreen
+          elif [ "$pct" -ge 60 ]; then color=yellow
+          else                         color=orange
+          fi
+          echo "coverage ${pct}%"
+          json="{\"schemaVersion\":1,\"label\":\"coverage\",\"message\":\"${pct}%\",\"color\":\"${color}\"}"
+
+          # A fresh orphan force-pushed each time keeps the badge branch a single
+          # commit rather than growing one per push to main.
+          work=$(mktemp -d)
+          cd "$work"
+          git init -q
+          git checkout -q --orphan badges
+          printf '%s\n' "$json" > coverage.json
+          git add coverage.json
+          git -c user.name="github-actions[bot]" \
+              -c user.email="41898282+github-actions[bot]@users.noreply.github.com" \
+              commit -q -m "coverage ${pct}% @ ${GITHUB_SHA}"
+          git push -q --force \
+            "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" badges

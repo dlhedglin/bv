@@ -1,0 +1,45 @@
+# Dependency audit -- the security check bv-4jdr scoped. The risk for a tool
+# whose own code touches no network and no credentials arrives through the
+# lockfile, so this audits the locked resolution against the advisory database
+# and fails on a known-vulnerable dependency. Static analysis (CodeQL) is a
+# separate, heavier addition; this is the one with real signal for the surface.
+#
+# pip-audit is PyPA's own tool. The lockfile is exported to a plain requirements
+# list first so the audit sees exactly what `uv sync` would install.
+
+name: security
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  # New advisories land against dependencies that have not changed, so a push
+  # is not the only time this needs to run.
+  schedule:
+    - cron: "0 6 * * 1"
+
+concurrency:
+  group: security-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v10.0.1
+        with:
+          python-version: "3.13"
+          enable-cache: true
+
+      - name: Audit the locked dependencies
+        run: |
+          uv export --frozen --no-emit-project --no-hashes \
+            --format requirements-txt -o requirements.txt
+          uvx pip-audit --requirement requirements.txt --strict
