@@ -17,6 +17,7 @@ from bv.beans import STATUS_ORDER, Bean, resolve_dependencies
 from bv.board import (
 	COLUMNS,
 	EMPTY_COLUMN,
+	MIN_CARD_WIDTH,
 	TITLE_LINES,
 	UNTITLED,
 	BeanBoard,
@@ -637,3 +638,29 @@ async def test_cards_mounted_after_the_first_paint_follow_the_same_rule(board, p
 	board.set_beans(many(4, project="demo-a"), show_project=False)
 	await pilot.pause()
 	assert all("demo-a" not in card.content.plain for card in cards(board, "todo"))
+
+
+@board_test
+async def test_cards_re_expand_after_the_terminal_grows_back(board, pilot):
+	# bv-41rc's grow-back case for the kanban board: shrink the terminal, then
+	# grow it, and assert the cards reclaim their width rather than staying
+	# pinned narrow -- the existing suite only proved the no-op guard can be
+	# bypassed, not that a real grow is honoured. The board tracks this off its
+	# own (settled-size) resize, unlike the tree's DataTable; see test_app.
+	async def settle(width):
+		# resize_terminal takes a couple of frames to reach the board; pump
+		# until the re-wrap has run.
+		await pilot.resize_terminal(width, 40)
+		for _ in range(3):
+			await pilot.pause()
+
+	board.set_beans(many(4), show_project=False)
+	await pilot.pause()
+	full = board._width
+	assert full > MIN_CARD_WIDTH  # the 120-col harness has room to spare
+
+	await settle(60)
+	assert board._width < full
+
+	await settle(120)
+	assert board._width == full
