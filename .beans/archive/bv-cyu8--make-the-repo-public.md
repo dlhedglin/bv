@@ -1,10 +1,10 @@
 ---
 # bv-cyu8
 title: Make the repo public
-status: todo
+status: completed
 type: epic
 created_at: 2026-08-18T15:01:00Z
-updated_at: 2026-08-18T15:01:00Z
+updated_at: 2026-08-19T20:38:28Z
 blocking:
     - bv-l0zp
 blocked_by:
