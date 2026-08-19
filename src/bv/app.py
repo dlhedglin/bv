@@ -186,6 +186,23 @@ POLL_INTERVAL = 0.5
 reload, so polling twice a second is cheap; see bv-scx8."""
 
 
+class BeanTable(DataTable):
+	"""The tree's DataTable, which drives its own Title-column refit.
+
+	The refit has to hang off *this* widget's resize rather than the app's: a
+	terminal resize reaches the app (screen) before the table's region has been
+	re-laid-out, so an app-level handler measures the old width -- and on a
+	grow-back the stale room recomputes to the cached narrow width, which the
+	fit's no-op guard swallows, leaving the column pinned (bv-41rc). The table's
+	own resize fires once its `size` is settled, so the fit sees the real width.
+	"""
+
+	def on_resize(self) -> None:
+		app = self.app
+		if isinstance(app, BeansViewer):
+			app._refit_title()
+
+
 class BeansViewer(App):
 	CSS_PATH = "app.tcss"
 	TITLE = "bv"
@@ -266,7 +283,7 @@ class BeansViewer(App):
 	def compose(self) -> ComposeResult:
 		yield Header()
 		with Horizontal():
-			yield DataTable(cursor_type="row", zebra_stripes=True)
+			yield BeanTable(cursor_type="row", zebra_stripes=True)
 			# Mounted, not created on demand, and hidden with a class. Almost
 			# every action in this class reaches for the table with a bare
 			# query_one, so removing it would turn every fold key into a
@@ -474,10 +491,22 @@ class BeansViewer(App):
 		title.width = width
 		return True
 
-	def on_resize(self) -> None:
-		# Titles are truncated to the column, so a resize has to rebuild them;
-		# _fit_title_column reports when nothing moved so an idle resize event
-		# does not cost a full re-render.
+	def _refit_title(self) -> None:
+		"""Re-fit the Title column to the table's current width and repaint.
+
+		Driven off the *table's* own resize (`BeanTable.on_resize`), not the
+		app's: a terminal resize reaches the app before the DataTable's region
+		has been re-laid-out, so an app-level handler measures the old width and
+		-- on a grow -- the stale room recomputes to the cached narrow width,
+		which `_fit_title_column`'s no-op guard then swallows, leaving Title
+		pinned. By the time the table itself is resized its `size` is settled,
+		so the fit sees the real reclaimed room. The toggles route here too,
+		after a refresh, for the width they hand the table by hiding a pane.
+		"""
+		# A resize event can still land during teardown; a repaint into a screen
+		# that is gone is the same hazard as _poll_for_changes and _render.
+		if not self.is_running:
+			return
 		if self._fit_title_column() and self._rows:
 			self._render()
 
@@ -529,7 +558,8 @@ class BeansViewer(App):
 		# The footer is built from whatever `check_action` allows, and nothing
 		# about swapping a `hidden` class tells it to ask again.
 		self.refresh_bindings()
-		self.call_after_refresh(self.on_resize)
+		# The table's width is settled after the next refresh; refit then.
+		self.call_after_refresh(self._refit_title)
 
 	def _board_beans(self) -> list[Bean]:
 		"""What the board shows: visible beans, filtered the same way the tree is.
@@ -729,8 +759,8 @@ class BeansViewer(App):
 			self._sync_preview()
 		# Hiding the preview hands the table another ~72 columns, all of which
 		# should go to the titles. The table has not been re-laid-out yet, so
-		# the refit waits a tick for its new size.
-		self.call_after_refresh(self.on_resize)
+		# the refit waits a refresh for its new size.
+		self.call_after_refresh(self._refit_title)
 
 	def action_preview_scroll(self, direction: int) -> None:
 		preview = self.query_one(BeanPreview)

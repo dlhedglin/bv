@@ -194,6 +194,40 @@ def test_toggling_back_returns_focus_to_the_table(tmp_path):
 	drive(tmp_path, scenario)
 
 
+def test_the_title_column_re_expands_after_the_terminal_grows_back(tmp_path):
+	"""bv-41rc. Shrink-then-grow left Title pinned at its shrunken width.
+
+	on_resize measured the table before its new size had settled, so a
+	grow-back recomputed the old (narrow) room, hit `_fit_title_column`'s no-op
+	guard, and never re-widened. Assert the reclaimed width is honoured.
+	"""
+	from bv.app import MIN_TITLE_WIDTH
+
+	async def settle(pilot, width):
+		# resize_terminal takes a couple of frames to reach the DataTable, whose
+		# own resize then drives the refit; pump enough for both to land.
+		await pilot.resize_terminal(width, 30)
+		for _ in range(4):
+			await pilot.pause()
+
+	async def scenario(app, pilot):
+		# Hide the preview and go wide, so Title has real room past the fixed
+		# columns -- the wide-board case the bean is about.
+		await pilot.press("p")
+		await pilot.pause()
+		await settle(pilot, 200)
+		full = app._title_width
+		assert full > MIN_TITLE_WIDTH
+
+		await settle(pilot, 100)
+		assert app._title_width < full
+
+		await settle(pilot, 200)
+		assert app._title_width == full
+
+	drive(tmp_path, scenario)
+
+
 # -- the preview's delayed render -----------------------------------------
 
 

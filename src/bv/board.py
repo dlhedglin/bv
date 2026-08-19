@@ -529,7 +529,11 @@ class BeanBoard(Horizontal):
 	def on_resize(self) -> None:
 		# Card text is wrapped to a measured width, so a resize has to re-wrap
 		# it -- but never remount it, which would throw away the scroll offset
-		# of every column on a window drag.
+		# of every column on a window drag. This handler is the board widget's
+		# own resize, so `self.size` is already the settled new size (unlike the
+		# app's screen-level resize, which fires before its DataTable child is
+		# re-laid-out -- see BeanTable). A grow-back therefore recomputes the
+		# real reclaimed width here rather than getting swallowed by the guard.
 		width = self._card_width()
 		if width == self._width:
 			return
