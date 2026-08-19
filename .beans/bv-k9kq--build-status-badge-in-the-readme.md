@@ -1,14 +1,14 @@
 ---
 # bv-k9kq
 title: Build status badge in the README
-status: todo
+status: completed
 type: task
 priority: normal
 tags:
     - docs
     - ci
 created_at: 2026-08-17T17:51:35Z
-updated_at: 2026-08-18T22:24:08Z
+updated_at: 2026-08-19T17:06:34Z
 blocked_by:
     - bv-cyu8
 ---

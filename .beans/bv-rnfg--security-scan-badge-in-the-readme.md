@@ -1,7 +1,7 @@
 ---
 # bv-rnfg
 title: Security scan badge in the README
-status: todo
+status: completed
 type: task
 priority: normal
 tags:
@@ -9,7 +9,7 @@ tags:
     - ci
     - security
 created_at: 2026-08-18T15:00:53Z
-updated_at: 2026-08-18T15:00:53Z
+updated_at: 2026-08-19T17:06:34Z
 blocked_by:
     - bv-4jdr
 ---

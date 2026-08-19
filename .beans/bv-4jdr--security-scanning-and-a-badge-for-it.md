@@ -1,7 +1,7 @@
 ---
 # bv-4jdr
 title: Security scanning, and a badge for it
-status: todo
+status: completed
 type: task
 priority: normal
 tags:
@@ -9,7 +9,7 @@ tags:
     - ci
     - security
 created_at: 2026-08-17T17:52:05Z
-updated_at: 2026-08-17T17:52:05Z
+updated_at: 2026-08-19T17:06:34Z
 blocked_by:
     - bv-a4we
 ---

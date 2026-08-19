@@ -1,14 +1,14 @@
 ---
 # bv-l0zp
 title: Coverage badge in the README
-status: todo
+status: completed
 type: task
 priority: normal
 tags:
     - docs
     - ci
 created_at: 2026-08-17T17:51:49Z
-updated_at: 2026-08-18T15:01:32Z
+updated_at: 2026-08-19T17:06:34Z
 blocked_by:
     - bv-a4we
     - bv-cyu8
