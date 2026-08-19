@@ -6,7 +6,7 @@
 # machine; nothing here re-states what a check is or in which order they run,
 # because that belongs in the Makefile and would silently drift if copied.
 
-name: check
+name: ci
 
 on:
   push:
@@ -17,7 +17,7 @@ on:
 # question nobody is asking any more, so cancel it. `github.ref` is per branch
 # and per pull request, so main and a PR never cancel each other.
 concurrency:
-  group: check-${{ github.ref }}
+  group: ci-${{ github.ref }}
   cancel-in-progress: true
 
 # The workflow reads the tree and reports a status. It writes nothing back, so
@@ -26,8 +26,8 @@ permissions:
   contents: read
 
 jobs:
-  check:
-    name: check (${{ matrix.python-version }})
+  ci:
+    name: ci (${{ matrix.python-version }})
     runs-on: ubuntu-latest
     # The suite takes about half a minute; ten leaves room for a cold cache and
     # a Python download while still killing a job wedged on something hung,
