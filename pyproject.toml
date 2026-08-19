@@ -1,0 +1,97 @@
+[project]
+name = "bv"
+version = "0.1.0"
+description = "Terminal viewer for beans issues across every repo at once"
+requires-python = ">=3.11"
+# PEP 639: an SPDX expression rather than the old free-text table, and the file
+# named so it is carried into wheel metadata instead of only sitting in the
+# tree. Needs hatchling >= 1.27, which [build-system] gets by not pinning.
+license = "MIT"
+license-files = ["LICENSE"]
+dependencies = [
+    "textual>=8.2,<9",
+    "rich>=13",
+]
+
+[project.scripts]
+bv = "bv.app:main"
+
+[dependency-groups]
+# ty is pre-1.0 and its rule set still moves between 0.0.x releases, so the
+# range is narrow: a new checker version is a deliberate bump, not a surprise
+# from a fresh `uv sync`.
+dev = [
+    "pytest>=8",
+    "pytest-cov>=7,<8",
+    "ty>=0.0.72,<0.1",
+    "ruff>=0.16,<0.17",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.pytest.ini_options]
+# Having this section at all is what makes the repo root pytest's rootdir, so
+# the settings below are found from any working directory and `make test` is
+# not the only invocation that gets them.
+#
+# testpaths itself is narrower than that: pytest only applies it when the
+# invocation directory *is* the rootdir (Config._decide_args), so it makes a
+# bare `uv run pytest` from the root collect exactly what `make test` collects,
+# and from a subdirectory pytest still collects that subdirectory. `make` is
+# always run from the root -- directly or via `make -C` -- so the target does
+# not depend on where you were standing.
+testpaths = ["tests"]
+# -ra summarises skips and xfails, which would otherwise be a bare character in
+# the progress line. The two --strict flags turn a typo into an error rather
+# than a silently ignored setting: an unregistered marker means the test it
+# decorates quietly does nothing, and an unknown ini key means this section is
+# not doing what it says.
+addopts = "-ra --strict-markers --strict-config"
+
+# No async plugin, deliberately. The async tests under tests/ are wrapped into
+# sync ones by their own module-level decorators (`board_test` and friends),
+# which drive Textual's `run_test` through `asyncio.run`. pytest 9 fails an
+# unwrapped `async def test_` outright rather than skipping it, so a new one
+# added without the decorator is loud, not lost.
+
+# Coverage settings live here rather than in the `make coverage` recipe, so a
+# bare `uv run pytest --cov` measures the same thing the target does. Only
+# `--cov`/`--cov-report` stay on the command line, because they are also what
+# keeps instrumentation out of the default `make test`.
+[tool.coverage.run]
+# Measure the installed `bv` package wherever it resolves from, rather than a
+# relative path: the project is installed into .venv in editable mode, so a
+# path-based source can end up counted twice under two names.
+source_pkgs = ["bv"]
+branch = true
+
+[tool.coverage.report]
+# `make coverage` asks for term-missing explicitly; this makes a bare
+# `uv run pytest --cov` print the same missing-line column instead of a bare
+# percentage. No `exclude_lines` additions: the tree has no TYPE_CHECKING
+# blocks, `@overload`s or `raise NotImplementedError` stubs to exclude, and
+# excluding patterns that do not occur only hides the day one appears.
+show_missing = true
+# No fail_under. The baseline is recorded in the bean's Shipped notes; picking
+# a threshold before the number was known would either set it uselessly low or
+# break the target on the first run.
+
+[tool.ruff]
+line-length = 120
+target-version = "py311"
+
+# No [tool.ruff.lint] select. The tree runs on ruff's own default rule set --
+# 413 rules in 0.16, curated per-rule rather than by family, and already clean
+# here. A hand-written `select` would *replace* that default, not add to it,
+# which is how the previous 11-family list ended up enforcing 277 rules where
+# the stock default enforces 413. The ruff dependency is pinned to the 0.16
+# line in [dependency-groups], so a widened default arrives on a deliberate
+# bump rather than from a fresh `uv sync`.
+
+[tool.ruff.format]
+# Tabs. One indent is one character, and how wide it looks is the reader's
+# setting rather than this file's. line-length above is measured with a tab
+# counted as `indent-width` (4) columns.
+indent-style = "tab"

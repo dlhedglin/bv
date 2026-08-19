@@ -1,0 +1,68 @@
+# The gate that proves this builds on a machine that is not mine.
+#
+# The job runs `make check` and nothing else -- the same target a contributor
+# runs before committing, typechecking with ty, linting with ruff and running
+# the suite. Everything above that step exists only to hand the target a
+# machine; nothing here re-states what a check is or in which order they run,
+# because that belongs in the Makefile and would silently drift if copied.
+
+name: check
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# A second push to the same branch makes the run already in flight answer a
+# question nobody is asking any more, so cancel it. `github.ref` is per branch
+# and per pull request, so main and a PR never cancel each other.
+concurrency:
+  group: check-${{ github.ref }}
+  cancel-in-progress: true
+
+# The workflow reads the tree and reports a status. It writes nothing back, so
+# it gets no token that could.
+permissions:
+  contents: read
+
+jobs:
+  check:
+    name: check (${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    # The suite takes about half a minute; ten leaves room for a cold cache and
+    # a Python download while still killing a job wedged on something hung,
+    # rather than letting it burn the default six hours.
+    timeout-minutes: 10
+
+    strategy:
+      # One version failing is a fact about that version. Cancelling the other
+      # two would hide whether it is the version or the change that broke.
+      fail-fast: false
+      matrix:
+        # What `requires-python = ">=3.11"` claims. The floor is the load-
+        # bearing one: 3.13 is what gets run day to day, so a 3.11-incompatible
+        # syntax or stdlib addition would otherwise land unnoticed.
+        python-version: ["3.11", "3.12", "3.13"]
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install uv
+        # An exact tag, not a floating `v10`: setup-uv stopped publishing the
+        # moving major-version tag after v7, so `@v10` does not resolve at all.
+        uses: astral-sh/setup-uv@v10.0.1
+        with:
+          # Exports UV_PYTHON, which every `uv run` in the Makefile then obeys
+          # -- so the matrix is real without the targets knowing about CI. uv
+          # downloads the interpreter on first use when the runner lacks it.
+          python-version: ${{ matrix.python-version }}
+          # The uv cache, not a virtualenv: `uv sync` still runs, it just
+          # resolves and unpacks from disk. The cache key already includes the
+          # Python version and a hash of uv.lock, so the three legs neither
+          # share an entry nor keep a stale one after a lock change.
+          enable-cache: true
+
+      # No `uv sync` step. Every Makefile target goes through `uv run`, which
+      # syncs the environment from uv.lock first, so a separate install step
+      # would only run the same resolution twice.
+      - run: make check

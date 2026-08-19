@@ -1,0 +1,15 @@
+__pycache__/
+*.py[cod]
+.venv/
+dist/
+build/
+*.egg-info/
+.ruff_cache/
+.pytest_cache/
+.coverage
+htmlcov/
+.DS_Store
+
+# Claude Code local dir (worktrees, sessions, settings) and Playwright MCP scratch.
+.claude/
+.playwright-mcp/

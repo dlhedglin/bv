@@ -1,0 +1,9 @@
+#!/bin/sh
+# Pre-commit gate: typecheck, lint, then the test suite -- the exact `make
+# check` that CI runs, so a commit that passes locally and a green pipeline mean
+# the same thing. Ordered cheapest-feedback-first inside the target itself.
+#
+# Version-controlled here rather than in .git/hooks so every clone runs the same
+# gate; `make hooks` points core.hooksPath at this directory. Bypass a single
+# commit with `git commit --no-verify` when you genuinely must.
+exec make check

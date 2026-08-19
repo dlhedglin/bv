@@ -1,0 +1,33 @@
+Screen {
+    background: $surface;
+}
+
+DataTable {
+    height: 1fr;
+    width: 2fr;
+}
+
+/* The table is the thing being navigated, so it keeps the larger share.
+   The preview is capped so it cannot swallow a wide terminal. */
+#preview {
+    height: 1fr;
+    width: 1fr;
+    max-width: 72;
+    border-left: vkey $panel;
+}
+
+#preview.hidden {
+    display: none;
+}
+
+DataTable > .datatable--header {
+    text-style: bold;
+    background: $panel;
+}
+
+DataTable > .datatable--cursor {
+    background: $accent 30%;
+}
+
+#board.hidden { display: none; }
+DataTable.hidden { display: none; }
