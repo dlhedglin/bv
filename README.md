@@ -1,6 +1,6 @@
 # bv
 
-> A terminal viewer for [beans](https://github.com/hmans/beans) issues, across every repo at once.
+> A terminal viewer for [beans](https://github.com/hmans/beans) issues — every repo at once, with a kanban board, themes, and Claude agent dispatch.
 
 [![ci](https://github.com/dlhedglin/bv/actions/workflows/ci.yml/badge.svg)](https://github.com/dlhedglin/bv/actions/workflows/ci.yml)
 [![security](https://github.com/dlhedglin/bv/actions/workflows/security.yml/badge.svg)](https://github.com/dlhedglin/bv/actions/workflows/security.yml)
@@ -8,40 +8,31 @@
 
 ![bv showing a directory of repos as one folding tree, with a bean preview pane open and an agent cell marking the session working a bean](docs/board.png)
 
-`beans tui` searches upward for a single `.beans.yml`, so it only ever shows one
-project. bv addresses projects explicitly and puts a whole directory of repos on
-one screen — as a folding tree or a kanban board — and shows which Claude Code
-session is working which bean.
+bv reads the beans the [`beans`](https://github.com/hmans/beans) CLI writes and
+adds what `beans tui` does not:
+
+- **Every repo at once.** `beans tui` searches upward for a single `.beans.yml`,
+  so it only ever shows one project. bv addresses projects explicitly, so a
+  whole directory of repos becomes one screen.
+- **Two views.** A folding tree, or a kanban board grouped by status. `b` swaps
+  between them.
+- **Themes and vim keys.** A theme picker in the command palette; `hjkl`,
+  `gg`/`G`, `ctrl+d`/`ctrl+u` for navigation.
+- **Claude agents.** Dispatch a background Claude Code session on a bean, on the
+  main checkout or in an isolated git worktree, and see which session is working
+  which bean in the Agent column.
 
 ## Table of Contents
 
-- [Background](#background)
 - [Install](#install)
 - [Usage](#usage)
 - [Maintainers](#maintainers)
 - [Contributing](#contributing)
 - [License](#license)
 
-## Background
-
-bv reads the boards the [`beans`](https://github.com/hmans/beans) CLI writes and
-renders them read-only. It exists as a client rather than a fork of beans for two
-reasons:
-
-- **Every repo at once.** `beans tui` resolves one `.beans.yml` by searching
-  upward from the working directory, so it can only show a single project. bv
-  addresses projects explicitly, so a directory of repos becomes one board.
-- **Who is working what.** The interesting view — which Claude Code session or
-  agent is on which bean — is not a beans concept. It lives in `~/.claude/`, and
-  a client can join it in without carrying the beans codebase.
-
-bv never mutates a bean. The only writes it causes are the ones a *dispatched
-agent* makes to its own bean through its own CLI (see [Usage](#usage)); the bv
-process itself issues no `beans update`.
-
 ## Install
 
-bv reads the boards the `beans` CLI writes, so that comes first — without it
+bv reads the beans the `beans` CLI writes, so that comes first — without it
 there is nothing to view:
 
 ```sh
@@ -115,8 +106,8 @@ remembered across restarts.
 whole prompt, then dispatches `claude --bg` on the bean; the agent edits the
 project's checkout directly. `W` does the same but adds `--worktree`, so the
 agent lands in an isolated git worktree on its own branch — its edits reach the
-board only when that branch is merged. Either way the dialog asks first, because
-there is no undo beyond `claude stop`.
+main checkout only when that branch is merged. Either way the dialog asks first,
+because there is no undo beyond `claude stop`.
 
 bv chooses the session `--name` and puts the bean id in it, which is what makes
 the Agent column an exact match for anything bv started rather than a guess from
