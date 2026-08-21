@@ -886,7 +886,7 @@ class BeansViewer(App):
 		found = self._working.get(bean.id)
 		if found is None or not found.exact:
 			return Text("")
-		style = "bold yellow" if found.session.state == "blocked" else "bold green"
+		style = "bold yellow" if found.session.display_state == "blocked" else "bold green"
 		label = Text(found.label, style=style)
 		label.truncate(AGENT_WIDTH, overflow="ellipsis")
 		return label
@@ -940,16 +940,19 @@ class BeansViewer(App):
 		"""Toast once when a session under this board starts waiting on the user.
 
 		Runs on the 0.5 s poll, so a background agent that blocks for input is
-		seen without the grid open. Only sessions inside the board root count --
-		bv can see every job on the machine, and a toast for an unrelated repo's
-		agent is noise. Fires on the transition into `blocked`, not while it
-		stays there.
+		seen without the grid open. "Waiting" is `Session.needs_input` -- the
+		live tempo, not the declared `state` -- so a session composing a reply
+		mid-conversation does not count, and each fresh question the agent asks
+		raises its own toast. Fires on the transition into waiting, not while it
+		stays there. Only sessions inside the board root count -- bv can see
+		every job on the machine, and a toast for an unrelated repo's agent is
+		noise.
 		"""
 		root = resolved(self.root)
 		blocked = {
 			session.short: session
 			for session in self._sessions
-			if session.is_busy and session.state == "blocked" and (root is None or _session_within(session, root))
+			if session.needs_input and (root is None or _session_within(session, root))
 		}
 		if self._needs_input is None:
 			# First read: adopt the current set silently. What was already

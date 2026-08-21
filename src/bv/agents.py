@@ -49,6 +49,27 @@ def claude_home() -> Path:
 	return Path.home() / ".claude"
 
 
+def display_state(state: str, tempo: str) -> str:
+	"""What a session is *doing now*, reconciling its two clocks.
+
+	`state` is the milestone the agent last declared; it lags. `tempo` is the
+	daemon's live read of motion. They disagree during a question-and-answer
+	loop: the agent declares `blocked` when it asks, and `state` stays there
+	for the whole exchange while `tempo` swings `active` (composing a reply)
+	and `blocked` (waiting on the user). Trust the live clock:
+
+	- `active`  -- producing output right now, so: working, whatever `state` says.
+	- `blocked` -- genuinely waiting on the user: needs input.
+	- anything else (`idle`, unset) -- no motion to override with, so fall back
+	  to the declared `state` (a `done` session reads `done`, not `working`).
+	"""
+	if tempo == "active":
+		return "working"
+	if tempo == "blocked":
+		return "blocked"
+	return state
+
+
 @dataclass(frozen=True)
 class Session:
 	"""One Claude Code session, as far as bv is concerned."""
@@ -62,6 +83,9 @@ class Session:
 	# died without updating -- believing the file alone would show a ghost
 	# agent working a bean forever.
 	live: bool = False
+	# The daemon's live-motion clock (active/idle/blocked). Reconciled with the
+	# declared `state` by `display_state`; see there.
+	tempo: str = ""
 
 	@property
 	def state_rank(self) -> int:
@@ -70,6 +94,16 @@ class Session:
 	@property
 	def is_busy(self) -> bool:
 		return self.live and self.state in BUSY_STATES
+
+	@property
+	def display_state(self) -> str:
+		"""`state` reconciled with `tempo`; see the module function."""
+		return display_state(self.state, self.tempo)
+
+	@property
+	def needs_input(self) -> bool:
+		"""Live and actually waiting on the user right now (not mid-reply)."""
+		return self.live and self.display_state == "blocked"
 
 
 def _read_json(path: Path) -> dict | None:
@@ -121,6 +155,7 @@ def load_sessions(home: Path | None = None) -> list[Session]:
 				state=payload.get("state") or "",
 				cwd=cwd,
 				live=entry.name in live,
+				tempo=payload.get("tempo") or "",
 			)
 		)
 	sessions.sort(key=lambda s: (s.state_rank, s.name))

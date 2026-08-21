@@ -19,6 +19,7 @@ from bv.agents import (
 	attribute,
 	attribute_all,
 	claude_home,
+	display_state,
 	load_activity,
 	load_sessions,
 	session_name_for,
@@ -146,6 +147,43 @@ def test_sessions_within_lists_a_projects_sessions_live_first(tmp_path):
 	# Live sessions (busy) lead; the dead one trails.
 	assert shorts[-1] == "c"
 	assert set(shorts[:2]) == {"a", "b"}
+
+
+# -- state reconciled with tempo ------------------------------------------
+
+
+def test_active_tempo_reads_as_working_over_any_state():
+	# The question-loop case: declared blocked, but composing a reply now.
+	assert display_state("blocked", "active") == "working"
+	assert display_state("working", "active") == "working"
+
+
+def test_blocked_tempo_reads_as_needs_input():
+	assert display_state("working", "blocked") == "blocked"
+	assert display_state("blocked", "blocked") == "blocked"
+
+
+def test_a_quiet_tempo_falls_back_to_the_declared_state():
+	assert display_state("done", "idle") == "done"
+	assert display_state("working", "idle") == "working"
+	assert display_state("blocked", "") == "blocked"
+
+
+def test_needs_input_is_live_and_actually_waiting():
+	# Declared blocked but mid-reply -> not waiting.
+	assert session(state="blocked", tempo="active").needs_input is False
+	# Declared blocked and at rest -> waiting.
+	assert session(state="blocked", tempo="blocked").needs_input is True
+	# Dead sessions never wait, whatever the file says.
+	assert session(state="blocked", tempo="blocked", live=False).needs_input is False
+
+
+def test_tempo_is_read_from_the_state_file(tmp_path):
+	write_job(tmp_path, "abcd", tempo="active")
+	write_roster(tmp_path, "abcd")
+	loaded = {s.short: s for s in load_sessions(tmp_path)}
+	assert loaded["abcd"].tempo == "active"
+	assert loaded["abcd"].display_state == "working"
 
 
 # -- reading --------------------------------------------------------------

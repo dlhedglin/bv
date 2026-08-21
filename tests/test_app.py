@@ -631,3 +631,28 @@ def test_a_waiting_session_outside_the_board_is_ignored(tmp_path, monkeypatch):
 	app._sessions = [_session(Path("/somewhere/else"), "blocked")]
 	app._announce_needs_input()
 	assert toasts == []
+
+
+def test_a_session_composing_a_reply_does_not_toast_until_it_waits(tmp_path, monkeypatch):
+	# tempo, not the declared state, decides waiting: a blocked session that is
+	# actively composing a reply is working, and re-asking earns a fresh toast.
+	app, toasts = _muted(tmp_path, monkeypatch)
+	inside = str(tmp_path)
+
+	def sess(tempo):
+		return Session(short="a", name="agent A", state="blocked", cwd=inside, live=True, tempo=tempo)
+
+	# Mid-reply (active): not waiting, seeds silently.
+	app._sessions = [sess("active")]
+	app._announce_needs_input()
+	assert toasts == []
+	# Stops to wait -> one toast.
+	app._sessions = [sess("blocked")]
+	app._announce_needs_input()
+	assert toasts == [("agent A", "needs input")]
+	# Resumes, then waits again -> a second, distinct toast.
+	app._sessions = [sess("active")]
+	app._announce_needs_input()
+	app._sessions = [sess("blocked")]
+	app._announce_needs_input()
+	assert len(toasts) == 2

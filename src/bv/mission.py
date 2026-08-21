@@ -27,6 +27,7 @@ from textual.widgets import Static
 from .agents import (
 	Activity,
 	Session,
+	display_state,
 	load_activity,
 	load_sessions,
 	sessions_within,
@@ -99,7 +100,13 @@ def render_panel(session: Session, activity: Activity | None) -> RenderableType:
 	vanishing, because a session blinking out of the grid every few polls is
 	worse than one stale line.
 	"""
-	state = activity.state if activity else session.state
+	# What it is doing now, not the milestone it last declared: a session in a
+	# question loop stays `state=blocked` while it composes replies, and the
+	# badge must read `working` in those moments, not "needs input".
+	if activity:
+		state = display_state(activity.state, activity.tempo)
+	else:
+		state = session.display_state
 	badge = Text()
 	badge.append(session.name or session.short, style="bold")
 	badge.append("  ")
@@ -150,7 +157,7 @@ class AgentPanel(VerticalScroll):
 	"""One session's live cell. A scroll so a long feed never breaks the grid."""
 
 	def __init__(self, session: Session) -> None:
-		super().__init__(id=f"agent-{session.short}", classes=_state_class(session.state))
+		super().__init__(id=f"agent-{session.short}", classes=_state_class(session.display_state))
 		self._short = session.short
 		self._body = Static()
 
@@ -160,7 +167,8 @@ class AgentPanel(VerticalScroll):
 	def update(self, session: Session, activity: Activity | None) -> None:
 		"""Repaint in place; keep the widget so focus and scroll survive a poll."""
 		self._body.update(render_panel(session, activity))
-		self.set_classes(_state_class(activity.state if activity else session.state))
+		state = display_state(activity.state, activity.tempo) if activity else session.display_state
+		self.set_classes(_state_class(state))
 
 
 class MissionControl(ModalScreen[None]):

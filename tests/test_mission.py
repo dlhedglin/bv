@@ -174,6 +174,26 @@ def test_a_waiting_session_reads_needs_input(tmp_path, monkeypatch):
 	drive(home, root, scenario, monkeypatch)
 
 
+def test_a_session_composing_a_reply_reads_working_not_needs_input(tmp_path, monkeypatch):
+	"""bv-9gnt regression: a session in a question loop stays state=blocked
+
+	while it composes each reply. When its tempo is active it is working, and
+	the badge must say so rather than "needs input".
+	"""
+	home = tmp_path / "claude"
+	root = tmp_path / "proj"
+	root.mkdir()
+	write_job(home, "aaaa", str(root), name="agent", state="blocked", tempo="active")
+	write_roster(home, "aaaa")
+
+	async def scenario(screen, pilot):
+		text = painted(screen)
+		assert "working" in text
+		assert "needs input" not in text
+
+	drive(home, root, scenario, monkeypatch)
+
+
 def test_an_empty_project_says_so_rather_than_crashing(tmp_path, monkeypatch):
 	home = tmp_path / "claude"
 	root = tmp_path / "proj"
