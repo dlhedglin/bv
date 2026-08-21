@@ -19,9 +19,13 @@ from bv.agents import (
 	attribute,
 	attribute_all,
 	claude_home,
+	display_state,
+	load_activity,
 	load_sessions,
+	load_subagents,
 	session_name_for,
 	session_within,
+	sessions_within,
 )
 
 
@@ -30,6 +34,33 @@ def write_job(home: Path, short: str, **fields) -> None:
 	job.mkdir(parents=True, exist_ok=True)
 	payload = {"name": short, "cwd": "/tmp", "state": "working", **fields}
 	(job / "state.json").write_text(json.dumps(payload))
+
+
+def write_timeline(home: Path, short: str, *lines: str) -> None:
+	job = home / "jobs" / short
+	job.mkdir(parents=True, exist_ok=True)
+	(job / "timeline.jsonl").write_text("\n".join(lines) + "\n")
+
+
+def event(**fields: Any) -> str:
+	base = {"at": "2026-08-21T17:20:03.293Z", "state": "working", "detail": "", "text": ""}
+	return json.dumps({**base, **fields})
+
+
+def write_subagent(home: Path, session_id: str, agent_id: str, *entries: dict, project: str = "proj") -> Path:
+	sub = home / "projects" / project / session_id / "subagents"
+	sub.mkdir(parents=True, exist_ok=True)
+	path = sub / f"agent-{agent_id}.jsonl"
+	path.write_text("\n".join(json.dumps({"agentId": agent_id, **e}) for e in entries) + "\n")
+	return path
+
+
+def user_turn(text: str) -> dict:
+	return {"type": "user", "message": {"role": "user", "content": text}}
+
+
+def assistant_turn(*blocks: dict) -> dict:
+	return {"type": "assistant", "message": {"role": "assistant", "content": list(blocks)}}
 
 
 def write_roster(home: Path, *shorts: str) -> None:
@@ -47,6 +78,174 @@ def session(**kwargs: Any) -> Session:
 		"live": True,
 	}
 	return Session(**{**base, **kwargs})
+
+
+# -- activity (the mission-control feed) ----------------------------------
+
+
+def test_activity_reads_the_snapshot_and_the_tail(tmp_path):
+	write_job(
+		tmp_path,
+		"abcd",
+		state="blocked",
+		detail="awaiting review",
+		tempo="idle",
+		tokens=23127,
+		inFlight={"tasks": 2, "kinds": ["local_agent"]},
+		output={"result": "shipped"},
+	)
+	write_timeline(
+		tmp_path,
+		"abcd",
+		event(detail="reading beans"),
+		event(state="blocked", detail="awaiting review", text="what next?"),
+	)
+
+	activity = load_activity("abcd", tmp_path)
+
+	assert activity is not None
+	assert activity.state == "blocked"
+	assert activity.detail == "awaiting review"
+	assert activity.tempo == "idle"
+	assert activity.tokens == 23127
+	assert activity.subagents == 2
+	assert activity.child_kinds == ("local_agent",)
+	assert activity.result == "shipped"
+	assert [e.detail for e in activity.events] == ["reading beans", "awaiting review"]
+	assert activity.events[-1].text == "what next?"
+
+
+def test_activity_of_a_job_with_no_state_is_none(tmp_path):
+	assert load_activity("ghost", tmp_path) is None
+
+
+def test_a_job_with_no_timeline_still_reads_its_state(tmp_path):
+	write_job(tmp_path, "abcd", tokens=5)
+	activity = load_activity("abcd", tmp_path)
+	assert activity is not None
+	assert activity.events == ()
+	assert activity.tokens == 5
+
+
+def test_the_tail_skips_corrupt_lines_and_caps_length(tmp_path):
+	write_job(tmp_path, "abcd")
+	lines = ["{not json"] + [event(detail=f"step {i}") for i in range(20)]
+	write_timeline(tmp_path, "abcd", *lines)
+
+	activity = load_activity("abcd", tmp_path, tail=5)
+
+	assert activity is not None
+	# The garbage line is dropped and only the last five good lines survive.
+	assert [e.detail for e in activity.events] == [f"step {i}" for i in range(15, 20)]
+
+
+def test_missing_inflight_and_output_degrade_to_empty(tmp_path):
+	write_job(tmp_path, "abcd")  # no inFlight, no output
+	activity = load_activity("abcd", tmp_path)
+	assert activity is not None
+	assert activity.subagents == 0
+	assert activity.child_kinds == ()
+	assert activity.result == ""
+
+
+def test_sessions_within_lists_a_projects_sessions_live_first(tmp_path):
+	root = tmp_path / "proj"
+	root.mkdir()
+	(root / "sub").mkdir()
+	inside_live = session(short="a", name="a", cwd=str(root), state="working", live=True)
+	inside_sub = session(short="b", name="b", cwd=str(root / "sub"), state="working", live=True)
+	inside_dead = session(short="c", name="c", cwd=str(root), state="working", live=False)
+	outside = session(short="d", name="d", cwd=str(tmp_path / "other"), live=True)
+
+	within = sessions_within([outside, inside_dead, inside_live, inside_sub], root)
+
+	shorts = [s.short for s in within]
+	assert outside.short not in shorts
+	# Live sessions (busy) lead; the dead one trails.
+	assert shorts[-1] == "c"
+	assert set(shorts[:2]) == {"a", "b"}
+
+
+# -- subagents ------------------------------------------------------------
+
+
+def test_a_subagent_is_read_task_first_then_activity(tmp_path):
+	write_subagent(
+		tmp_path,
+		"sess-1",
+		"a1",
+		user_turn("Read the transcript and extract tactics"),
+		assistant_turn({"type": "text", "text": "reading"}, {"type": "tool_use", "name": "Bash"}),
+		assistant_turn({"type": "text", "text": "done, wrote the extraction"}),
+	)
+	subs = load_subagents("sess-1", tmp_path)
+	assert len(subs) == 1
+	sub = subs[0]
+	assert sub.id == "a1"
+	assert sub.task == "Read the transcript and extract tactics"
+	# Assistant turns become the feed; a tool call is named, text kept.
+	assert sub.events[0] == "reading ⚙ Bash"
+	assert sub.events[-1] == "done, wrote the extraction"
+
+
+def test_subagents_of_an_unknown_or_blank_session_are_empty(tmp_path):
+	assert load_subagents("", tmp_path) == ()
+	assert load_subagents("nope", tmp_path) == ()
+
+
+def test_a_corrupt_subagent_line_is_skipped_not_fatal(tmp_path):
+	path = write_subagent(tmp_path, "sess-1", "a1", user_turn("do X"))
+	path.write_text('{"agentId":"a1","type":"user","message":{"role":"user","content":"do X"}}\n{bad json\n')
+	subs = load_subagents("sess-1", tmp_path)
+	assert len(subs) == 1
+	assert subs[0].task == "do X"
+
+
+def test_load_subagents_keeps_the_newest_within_the_limit(tmp_path):
+	import os
+
+	for i in range(4):
+		p = write_subagent(tmp_path, "sess-1", f"a{i}", user_turn(f"task {i}"))
+		os.utime(p, (1000 + i, 1000 + i))  # a3 newest
+	subs = load_subagents("sess-1", tmp_path, limit=2)
+	assert [s.id for s in subs] == ["a3", "a2"]
+
+
+# -- state reconciled with tempo ------------------------------------------
+
+
+def test_active_tempo_reads_as_working_over_any_state():
+	# The question-loop case: declared blocked, but composing a reply now.
+	assert display_state("blocked", "active") == "working"
+	assert display_state("working", "active") == "working"
+
+
+def test_blocked_tempo_reads_as_needs_input():
+	assert display_state("working", "blocked") == "blocked"
+	assert display_state("blocked", "blocked") == "blocked"
+
+
+def test_a_quiet_tempo_falls_back_to_the_declared_state():
+	assert display_state("done", "idle") == "done"
+	assert display_state("working", "idle") == "working"
+	assert display_state("blocked", "") == "blocked"
+
+
+def test_needs_input_is_live_and_actually_waiting():
+	# Declared blocked but mid-reply -> not waiting.
+	assert session(state="blocked", tempo="active").needs_input is False
+	# Declared blocked and at rest -> waiting.
+	assert session(state="blocked", tempo="blocked").needs_input is True
+	# Dead sessions never wait, whatever the file says.
+	assert session(state="blocked", tempo="blocked", live=False).needs_input is False
+
+
+def test_tempo_is_read_from_the_state_file(tmp_path):
+	write_job(tmp_path, "abcd", tempo="active")
+	write_roster(tmp_path, "abcd")
+	loaded = {s.short: s for s in load_sessions(tmp_path)}
+	assert loaded["abcd"].tempo == "active"
+	assert loaded["abcd"].display_state == "working"
 
 
 # -- reading --------------------------------------------------------------

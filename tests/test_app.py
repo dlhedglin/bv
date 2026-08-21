@@ -25,6 +25,7 @@ from bv.agents import Session
 from bv.app import BeansViewer, resolve_root
 from bv.beans import Bean
 from bv.board import BeanBoard, BeanCard
+from bv.mission import MissionControl
 from bv.preview import BeanPreview
 
 Scenario = Callable[[BeansViewer, object], Awaitable[None]]
@@ -551,3 +552,107 @@ def test_scrolling_the_preview_renders_whatever_is_waiting(tmp_path):
 		assert preview.scroll_offset.y == 0
 
 	drive(tmp_path, scenario)
+
+
+def test_pressing_m_opens_mission_control_for_the_project(tmp_path):
+	"""bv-9gnt. `m` opens the agent grid for the project under the cursor."""
+
+	async def scenario(app, pilot):
+		# The board is empty here, so stand in for "cursor is on a project".
+		app._current_project = lambda: "demo"
+		await pilot.press("m")
+		await pilot.pause()
+		await pilot.pause()
+		assert isinstance(app.screen, MissionControl)
+		await pilot.press("escape")
+		await pilot.pause()
+		assert not isinstance(app.screen, MissionControl)
+
+	drive(tmp_path, scenario)
+
+
+def test_mission_control_bells_when_the_cursor_is_on_no_project(tmp_path):
+	"""No project under the cursor is a no-op, not a pushed empty screen."""
+
+	async def scenario(app, pilot):
+		app._current_project = lambda: None
+		await pilot.press("m")
+		await pilot.pause()
+		assert not any(isinstance(s, MissionControl) for s in app.screen_stack)
+
+	drive(tmp_path, scenario)
+
+
+# -- the "needs input" toast ----------------------------------------------
+
+# _announce_needs_input is exercised directly, not through the poll: it reads
+# self._sessions and the board root, and driving it by hand keeps the test off
+# the real ~/.claude while still crossing the transition it fires on.
+
+
+def _muted(root: Path, monkeypatch) -> tuple[BeansViewer, list]:
+	app = BeansViewer(root=root)
+	toasts: list = []
+	monkeypatch.setattr(app, "notify", lambda message, **kwargs: toasts.append((message, kwargs.get("title"))))
+	monkeypatch.setattr(app, "bell", lambda: None)
+	return app, toasts
+
+
+def _session(cwd: Path, state: str) -> Session:
+	return Session(short="a", name="agent A", state=state, cwd=str(cwd), live=True)
+
+
+def test_a_session_that_starts_waiting_raises_one_toast(tmp_path, monkeypatch):
+	app, toasts = _muted(tmp_path, monkeypatch)
+	# First read seeds the set silently.
+	app._sessions = [_session(tmp_path, "working")]
+	app._announce_needs_input()
+	assert toasts == []
+	# The agent blocks -> exactly one toast, titled for the watcher.
+	app._sessions = [_session(tmp_path, "blocked")]
+	app._announce_needs_input()
+	assert toasts == [("agent A", "needs input")]
+	# Still waiting on the next poll -> no repeat.
+	app._announce_needs_input()
+	assert len(toasts) == 1
+
+
+def test_a_session_already_waiting_at_startup_is_not_announced(tmp_path, monkeypatch):
+	app, toasts = _muted(tmp_path, monkeypatch)
+	app._sessions = [_session(tmp_path, "blocked")]
+	app._announce_needs_input()
+	assert toasts == []
+
+
+def test_a_waiting_session_outside_the_board_is_ignored(tmp_path, monkeypatch):
+	app, toasts = _muted(tmp_path, monkeypatch)
+	app._sessions = []
+	app._announce_needs_input()  # seed
+	app._sessions = [_session(Path("/somewhere/else"), "blocked")]
+	app._announce_needs_input()
+	assert toasts == []
+
+
+def test_a_session_composing_a_reply_does_not_toast_until_it_waits(tmp_path, monkeypatch):
+	# tempo, not the declared state, decides waiting: a blocked session that is
+	# actively composing a reply is working, and re-asking earns a fresh toast.
+	app, toasts = _muted(tmp_path, monkeypatch)
+	inside = str(tmp_path)
+
+	def sess(tempo):
+		return Session(short="a", name="agent A", state="blocked", cwd=inside, live=True, tempo=tempo)
+
+	# Mid-reply (active): not waiting, seeds silently.
+	app._sessions = [sess("active")]
+	app._announce_needs_input()
+	assert toasts == []
+	# Stops to wait -> one toast.
+	app._sessions = [sess("blocked")]
+	app._announce_needs_input()
+	assert toasts == [("agent A", "needs input")]
+	# Resumes, then waits again -> a second, distinct toast.
+	app._sessions = [sess("active")]
+	app._announce_needs_input()
+	app._sessions = [sess("blocked")]
+	app._announce_needs_input()
+	assert len(toasts) == 2

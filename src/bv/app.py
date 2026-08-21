@@ -51,6 +51,7 @@ from .dispatch import (
 	dispatch,
 	request_for,
 )
+from .mission import MissionControl
 from .preview import BeanPreview
 from .tree import (
 	Node,
@@ -222,6 +223,7 @@ class BeansViewer(App):
 		Binding("a", "toggle_archived", "Archived"),
 		Binding("S", "spawn", "Spawn agent"),
 		Binding("W", "spawn_worktree", "Worktree agent"),
+		Binding("m", "mission_control", "Mission control"),
 		Binding("y", "yank_id", "Yank id"),
 		# The second half of the pair, hidden for the same reason `G` is: the
 		# footer is a reminder of the common keys, not a manual.
@@ -263,6 +265,11 @@ class BeansViewer(App):
 		self._show_archived = False
 		self._sessions: list[Session] = []
 		self._working: dict[str, Attribution] = {}
+		# Shorts of sessions under this board that are currently waiting on the
+		# user, so a fresh block raises one toast and a still-blocked session
+		# stays quiet. `None` until the first read, which seeds without firing
+		# -- a session already blocked when bv starts is not news.
+		self._needs_input: set[str] | None = None
 		self._board = False
 
 	def check_action(self, action: str, parameters: tuple[object, ...]) -> bool | None:
@@ -632,6 +639,33 @@ class BeansViewer(App):
 		node = self._current_node()
 		return node.bean if node else None
 
+	def _current_project(self) -> str | None:
+		"""The project the cursor is on, heading or bean, in either view.
+
+		Branches on the view for the same reason as `_current_bean`: the tree's
+		`DataTable` keeps a stale cursor while the board is up, so reading its
+		row on the board would name whatever project the tree was parked on.
+		"""
+		if self._board:
+			bean = self.query_one(BeanBoard).selected
+			return bean.project if bean else None
+		node = self._current_node()
+		return node.project if node else None
+
+	def action_mission_control(self) -> None:
+		"""Open the live agent grid for the project under the cursor."""
+		project = self._current_project()
+		if project is None:
+			self.bell()
+			return
+		self.push_screen(
+			MissionControl(
+				project,
+				self._project_root(project),
+				poll_interval=POLL_INTERVAL,
+			)
+		)
+
 	def _agent_on(self, bean: Bean) -> str | None:
 		"""The session already working `bean`, if bv can see one.
 
@@ -852,7 +886,7 @@ class BeansViewer(App):
 		found = self._working.get(bean.id)
 		if found is None or not found.exact:
 			return Text("")
-		style = "bold yellow" if found.session.state == "blocked" else "bold green"
+		style = "bold yellow" if found.session.display_state == "blocked" else "bold green"
 		label = Text(found.label, style=style)
 		label.truncate(AGENT_WIDTH, overflow="ellipsis")
 		return label
@@ -899,7 +933,36 @@ class BeansViewer(App):
 			self._sessions,
 			((bean.id, self._project_root(bean.project), bean.status == "in-progress") for bean in self._beans),
 		)
+		self._announce_needs_input()
 		return self._session_render_state() != previous
+
+	def _announce_needs_input(self) -> None:
+		"""Toast once when a session under this board starts waiting on the user.
+
+		Runs on the 0.5 s poll, so a background agent that blocks for input is
+		seen without the grid open. "Waiting" is `Session.needs_input` -- the
+		live tempo, not the declared `state` -- so a session composing a reply
+		mid-conversation does not count, and each fresh question the agent asks
+		raises its own toast. Fires on the transition into waiting, not while it
+		stays there. Only sessions inside the board root count -- bv can see
+		every job on the machine, and a toast for an unrelated repo's agent is
+		noise.
+		"""
+		root = resolved(self.root)
+		blocked = {
+			session.short: session
+			for session in self._sessions
+			if session.needs_input and (root is None or _session_within(session, root))
+		}
+		if self._needs_input is None:
+			# First read: adopt the current set silently. What was already
+			# waiting when bv launched is not a new event.
+			self._needs_input = set(blocked)
+			return
+		for short in blocked.keys() - self._needs_input:
+			self.bell()
+			self.notify(blocked[short].name, title="needs input", severity="warning")
+		self._needs_input = set(blocked)
 
 	def _session_render_state(self) -> tuple[object, ...]:
 		"""Everything the Agent column and the coarse agent tier paint from the
