@@ -25,6 +25,7 @@ from bv.agents import Session
 from bv.app import BeansViewer, resolve_root
 from bv.beans import Bean
 from bv.board import BeanBoard, BeanCard
+from bv.mission import MissionControl
 from bv.preview import BeanPreview
 
 Scenario = Callable[[BeansViewer, object], Awaitable[None]]
@@ -549,5 +550,34 @@ def test_scrolling_the_preview_renders_whatever_is_waiting(tmp_path):
 		await pilot.press("ctrl+b")
 		await pilot.pause()
 		assert preview.scroll_offset.y == 0
+
+	drive(tmp_path, scenario)
+
+
+def test_pressing_m_opens_mission_control_for_the_project(tmp_path):
+	"""bv-9gnt. `m` opens the agent grid for the project under the cursor."""
+
+	async def scenario(app, pilot):
+		# The board is empty here, so stand in for "cursor is on a project".
+		app._current_project = lambda: "demo"
+		await pilot.press("m")
+		await pilot.pause()
+		await pilot.pause()
+		assert isinstance(app.screen, MissionControl)
+		await pilot.press("escape")
+		await pilot.pause()
+		assert not isinstance(app.screen, MissionControl)
+
+	drive(tmp_path, scenario)
+
+
+def test_mission_control_bells_when_the_cursor_is_on_no_project(tmp_path):
+	"""No project under the cursor is a no-op, not a pushed empty screen."""
+
+	async def scenario(app, pilot):
+		app._current_project = lambda: None
+		await pilot.press("m")
+		await pilot.pause()
+		assert not any(isinstance(s, MissionControl) for s in app.screen_stack)
 
 	drive(tmp_path, scenario)

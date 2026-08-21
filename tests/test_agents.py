@@ -19,9 +19,11 @@ from bv.agents import (
 	attribute,
 	attribute_all,
 	claude_home,
+	load_activity,
 	load_sessions,
 	session_name_for,
 	session_within,
+	sessions_within,
 )
 
 
@@ -30,6 +32,17 @@ def write_job(home: Path, short: str, **fields) -> None:
 	job.mkdir(parents=True, exist_ok=True)
 	payload = {"name": short, "cwd": "/tmp", "state": "working", **fields}
 	(job / "state.json").write_text(json.dumps(payload))
+
+
+def write_timeline(home: Path, short: str, *lines: str) -> None:
+	job = home / "jobs" / short
+	job.mkdir(parents=True, exist_ok=True)
+	(job / "timeline.jsonl").write_text("\n".join(lines) + "\n")
+
+
+def event(**fields: Any) -> str:
+	base = {"at": "2026-08-21T17:20:03.293Z", "state": "working", "detail": "", "text": ""}
+	return json.dumps({**base, **fields})
 
 
 def write_roster(home: Path, *shorts: str) -> None:
@@ -47,6 +60,92 @@ def session(**kwargs: Any) -> Session:
 		"live": True,
 	}
 	return Session(**{**base, **kwargs})
+
+
+# -- activity (the mission-control feed) ----------------------------------
+
+
+def test_activity_reads_the_snapshot_and_the_tail(tmp_path):
+	write_job(
+		tmp_path,
+		"abcd",
+		state="blocked",
+		detail="awaiting review",
+		tempo="idle",
+		tokens=23127,
+		inFlight={"tasks": 2, "kinds": ["local_agent"]},
+		output={"result": "shipped"},
+	)
+	write_timeline(
+		tmp_path,
+		"abcd",
+		event(detail="reading beans"),
+		event(state="blocked", detail="awaiting review", text="what next?"),
+	)
+
+	activity = load_activity("abcd", tmp_path)
+
+	assert activity is not None
+	assert activity.state == "blocked"
+	assert activity.detail == "awaiting review"
+	assert activity.tempo == "idle"
+	assert activity.tokens == 23127
+	assert activity.subagents == 2
+	assert activity.child_kinds == ("local_agent",)
+	assert activity.result == "shipped"
+	assert [e.detail for e in activity.events] == ["reading beans", "awaiting review"]
+	assert activity.events[-1].text == "what next?"
+
+
+def test_activity_of_a_job_with_no_state_is_none(tmp_path):
+	assert load_activity("ghost", tmp_path) is None
+
+
+def test_a_job_with_no_timeline_still_reads_its_state(tmp_path):
+	write_job(tmp_path, "abcd", tokens=5)
+	activity = load_activity("abcd", tmp_path)
+	assert activity is not None
+	assert activity.events == ()
+	assert activity.tokens == 5
+
+
+def test_the_tail_skips_corrupt_lines_and_caps_length(tmp_path):
+	write_job(tmp_path, "abcd")
+	lines = ["{not json"] + [event(detail=f"step {i}") for i in range(20)]
+	write_timeline(tmp_path, "abcd", *lines)
+
+	activity = load_activity("abcd", tmp_path, tail=5)
+
+	assert activity is not None
+	# The garbage line is dropped and only the last five good lines survive.
+	assert [e.detail for e in activity.events] == [f"step {i}" for i in range(15, 20)]
+
+
+def test_missing_inflight_and_output_degrade_to_empty(tmp_path):
+	write_job(tmp_path, "abcd")  # no inFlight, no output
+	activity = load_activity("abcd", tmp_path)
+	assert activity is not None
+	assert activity.subagents == 0
+	assert activity.child_kinds == ()
+	assert activity.result == ""
+
+
+def test_sessions_within_lists_a_projects_sessions_live_first(tmp_path):
+	root = tmp_path / "proj"
+	root.mkdir()
+	(root / "sub").mkdir()
+	inside_live = session(short="a", name="a", cwd=str(root), state="working", live=True)
+	inside_sub = session(short="b", name="b", cwd=str(root / "sub"), state="working", live=True)
+	inside_dead = session(short="c", name="c", cwd=str(root), state="working", live=False)
+	outside = session(short="d", name="d", cwd=str(tmp_path / "other"), live=True)
+
+	within = sessions_within([outside, inside_dead, inside_live, inside_sub], root)
+
+	shorts = [s.short for s in within]
+	assert outside.short not in shorts
+	# Live sessions (busy) lead; the dead one trails.
+	assert shorts[-1] == "c"
+	assert set(shorts[:2]) == {"a", "b"}
 
 
 # -- reading --------------------------------------------------------------

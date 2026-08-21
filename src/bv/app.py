@@ -51,6 +51,7 @@ from .dispatch import (
 	dispatch,
 	request_for,
 )
+from .mission import MissionControl
 from .preview import BeanPreview
 from .tree import (
 	Node,
@@ -222,6 +223,7 @@ class BeansViewer(App):
 		Binding("a", "toggle_archived", "Archived"),
 		Binding("S", "spawn", "Spawn agent"),
 		Binding("W", "spawn_worktree", "Worktree agent"),
+		Binding("m", "mission_control", "Mission control"),
 		Binding("y", "yank_id", "Yank id"),
 		# The second half of the pair, hidden for the same reason `G` is: the
 		# footer is a reminder of the common keys, not a manual.
@@ -631,6 +633,33 @@ class BeansViewer(App):
 			return self.query_one(BeanBoard).selected
 		node = self._current_node()
 		return node.bean if node else None
+
+	def _current_project(self) -> str | None:
+		"""The project the cursor is on, heading or bean, in either view.
+
+		Branches on the view for the same reason as `_current_bean`: the tree's
+		`DataTable` keeps a stale cursor while the board is up, so reading its
+		row on the board would name whatever project the tree was parked on.
+		"""
+		if self._board:
+			bean = self.query_one(BeanBoard).selected
+			return bean.project if bean else None
+		node = self._current_node()
+		return node.project if node else None
+
+	def action_mission_control(self) -> None:
+		"""Open the live agent grid for the project under the cursor."""
+		project = self._current_project()
+		if project is None:
+			self.bell()
+			return
+		self.push_screen(
+			MissionControl(
+				project,
+				self._project_root(project),
+				poll_interval=POLL_INTERVAL,
+			)
+		)
 
 	def _agent_on(self, bean: Bean) -> str | None:
 		"""The session already working `bean`, if bv can see one.

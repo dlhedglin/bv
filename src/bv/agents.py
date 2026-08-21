@@ -127,6 +127,129 @@ def load_sessions(home: Path | None = None) -> list[Session]:
 	return sessions
 
 
+@dataclass(frozen=True)
+class TimelineEvent:
+	"""One line of a session's `timeline.jsonl`.
+
+	`text` is the longer message body a session emits (a reply, a result); it
+	is empty for most status-only ticks, where `detail` alone moves.
+	"""
+
+	at: str
+	state: str
+	detail: str
+	text: str
+
+
+@dataclass(frozen=True)
+class Activity:
+	"""The live detail behind a `Session`, for the mission-control grid.
+
+	`load_sessions` answers *who is on what*; this answers *what are they
+	doing right now*. Same files, read only when a panel is open, because the
+	timeline tail costs more than the board's per-tick budget allows.
+	"""
+
+	short: str
+	state: str
+	detail: str
+	tempo: str
+	tokens: int
+	# Subagents in flight. `children` in state.json stays null even while a
+	# subagent runs, so `inFlight.tasks` (with its `kinds`) is the signal the
+	# panel trusts; `child_kinds` names them (e.g. "local_agent").
+	subagents: int
+	child_kinds: tuple[str, ...]
+	result: str
+	events: tuple[TimelineEvent, ...]
+
+
+def _as_int(value: object) -> int:
+	return value if isinstance(value, int) and not isinstance(value, bool) else 0
+
+
+def _tail_events(path: Path, limit: int) -> tuple[TimelineEvent, ...]:
+	"""The last `limit` well-formed lines of a `timeline.jsonl`, oldest first.
+
+	Never raises: a missing file, a truncated tail mid-write, or a stray
+	non-object line each drop to nothing rather than taking a panel down.
+	"""
+	try:
+		with path.open(encoding="utf-8") as handle:
+			lines = handle.readlines()
+	except OSError:
+		return ()
+	events: list[TimelineEvent] = []
+	for line in lines[-limit:]:
+		line = line.strip()
+		if not line:
+			continue
+		try:
+			payload = json.loads(line)
+		except json.JSONDecodeError:
+			continue
+		if not isinstance(payload, dict):
+			continue
+		events.append(
+			TimelineEvent(
+				at=str(payload.get("at") or ""),
+				state=str(payload.get("state") or ""),
+				detail=str(payload.get("detail") or ""),
+				text=str(payload.get("text") or ""),
+			)
+		)
+	return tuple(events)
+
+
+def load_activity(short: str, home: Path | None = None, *, tail: int = 12) -> Activity | None:
+	"""The live activity for one session `short`, or None if it cannot be read.
+
+	Reads the same `~/.claude/jobs/<short>/` bv already trusts: `state.json`
+	for the snapshot, `timeline.jsonl` for the rolling feed. Observe-only, like
+	the rest of this module -- nothing here writes or attaches.
+	"""
+	root = home or claude_home()
+	job = root / "jobs" / short
+	payload = _read_json(job / "state.json")
+	if payload is None:
+		return None
+	in_flight = payload.get("inFlight")
+	in_flight = in_flight if isinstance(in_flight, dict) else {}
+	kinds = in_flight.get("kinds")
+	child_kinds = tuple(str(k) for k in kinds) if isinstance(kinds, list) else ()
+	output = payload.get("output")
+	result = ""
+	if isinstance(output, dict):
+		result = str(output.get("result") or "")
+	return Activity(
+		short=short,
+		state=str(payload.get("state") or ""),
+		detail=str(payload.get("detail") or ""),
+		tempo=str(payload.get("tempo") or ""),
+		tokens=_as_int(payload.get("tokens")),
+		subagents=_as_int(in_flight.get("tasks")),
+		child_kinds=child_kinds,
+		result=result,
+		events=_tail_events(job / "timeline.jsonl", tail),
+	)
+
+
+def sessions_within(sessions: Iterable[Session], root: Path) -> list[Session]:
+	"""The sessions running inside `root`, live ones first.
+
+	The mission-control grid's project filter: same `_within` test the coarse
+	attribution tier uses, but returned as a list rather than folded into a
+	single guess. Dead sessions trail live ones so a full grid leads with what
+	is still running.
+	"""
+	resolved_root = resolved(root)
+	if resolved_root is None:
+		return []
+	within = [s for s in sessions if session_within(s, resolved_root)]
+	within.sort(key=lambda s: (not s.is_busy, s.state_rank, s.name))
+	return within
+
+
 def resolved(path: str | Path) -> Path | None:
 	"""Resolve symlinks, because a board root can be one into a synced folder.
 
