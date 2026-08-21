@@ -65,6 +65,21 @@ def _tokens(count: int) -> str:
 	return str(count)
 
 
+_LINE_CAP = 240
+"""Characters kept per feed line. Agent replies run to paragraphs; a panel is a
+glance, so each turn is flattened to one capped line and the panel scrolls."""
+
+
+def _flatten(text: str) -> str:
+	"""Collapse a multi-paragraph message to one line, capped.
+
+	Timeline `text` carries the agent's real reply, blank lines and all. The
+	grid shows the shape of the conversation, not the whole of it.
+	"""
+	one = " ".join(text.split())
+	return one if len(one) <= _LINE_CAP else one[: _LINE_CAP - 1] + "…"
+
+
 def render_panel(session: Session, activity: Activity | None) -> RenderableType:
 	"""The contents of one agent panel: a header line, then the recent feed.
 
@@ -103,7 +118,15 @@ def render_panel(session: Session, activity: Activity | None) -> RenderableType:
 		clock = event.at[11:16] if len(event.at) >= 16 else ""
 		row = Text()
 		row.append(f"{clock} ", style="dim")
-		row.append(event.detail or event.state, style="")
+		# `text` is the agent's actual reply; `detail` is only its status
+		# headline (and is where a user's own typed message lands). Lead with
+		# what the agent said, so the feed reads as output, not an echo of the
+		# prompts. A text-less tick keeps its status line, dimmed.
+		if event.text:
+			row.append("› ", style="dim")
+			row.append(_flatten(event.text))
+		else:
+			row.append(event.detail or event.state, style="dim")
 		lines.append(row)
 
 	if not feed and activity.result:

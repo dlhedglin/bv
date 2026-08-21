@@ -123,6 +123,38 @@ def test_a_panel_paints_the_session_and_its_feed(tmp_path, monkeypatch):
 	drive(home, root, scenario, monkeypatch)
 
 
+def test_a_panel_shows_the_agents_output_not_just_status(tmp_path, monkeypatch):
+	"""bv-9gnt regression: the feed led with `detail` and hid `text`, so a
+
+	watcher saw status headlines and their own prompts but never the agent's
+	replies. The agent's `text` must reach the panel.
+	"""
+	home = tmp_path / "claude"
+	root = tmp_path / "proj"
+	root.mkdir()
+	write_job(home, "aaaa", str(root), name="bv-9gnt · Agents view")
+	write_timeline(
+		home,
+		"aaaa",
+		# A user turn: detail carries the message, text is empty.
+		{"at": "2026-08-21T17:20:00.000Z", "state": "blocked", "detail": "what branch are we on?", "text": ""},
+		# The agent's reply lands in text.
+		{
+			"at": "2026-08-21T17:20:09.000Z",
+			"state": "working",
+			"detail": "confirming branch",
+			"text": "We are on main, HEAD abc123.",
+		},
+	)
+	write_roster(home, "aaaa")
+
+	async def scenario(screen, pilot):
+		text = painted(screen)
+		assert "We are on main, HEAD abc123." in text
+
+	drive(home, root, scenario, monkeypatch)
+
+
 def test_an_empty_project_says_so_rather_than_crashing(tmp_path, monkeypatch):
 	home = tmp_path / "claude"
 	root = tmp_path / "proj"
