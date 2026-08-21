@@ -19,6 +19,7 @@ Nothing here writes. Sessions are observed, never controlled.
 
 from __future__ import annotations
 
+import glob
 import json
 import os
 from collections.abc import Iterable
@@ -86,6 +87,10 @@ class Session:
 	# The daemon's live-motion clock (active/idle/blocked). Reconciled with the
 	# declared `state` by `display_state`; see there.
 	tempo: str = ""
+	# The conversation's UUID, which keys its transcript and subagent files
+	# under `~/.claude/projects/`. The `short` keys the job dir; the two are
+	# different names for the same session. See `load_subagents`.
+	session_id: str = ""
 
 	@property
 	def state_rank(self) -> int:
@@ -156,6 +161,7 @@ def load_sessions(home: Path | None = None) -> list[Session]:
 				cwd=cwd,
 				live=entry.name in live,
 				tempo=payload.get("tempo") or "",
+				session_id=payload.get("sessionId") or "",
 			)
 		)
 	sessions.sort(key=lambda s: (s.state_rank, s.name))
@@ -267,6 +273,124 @@ def load_activity(short: str, home: Path | None = None, *, tail: int = 12) -> Ac
 		result=result,
 		events=_tail_events(job / "timeline.jsonl", tail),
 	)
+
+
+@dataclass(frozen=True)
+class Subagent:
+	"""One in-process subagent (a Task/`local_agent`) of a session.
+
+	These are not daemon jobs -- they have no `state.json`, no roster entry --
+	so the session's `inFlight.tasks` only *counts* them. Their transcripts,
+	however, are written per-agent under the session's `~/.claude/projects`
+	directory, which is where the detail for a tile comes from.
+	"""
+
+	id: str
+	# The prompt the subagent was handed -- the best one-line answer to "what
+	# is this one doing", taken from its first user turn.
+	task: str
+	# Recent assistant activity (text and tool calls), oldest first.
+	events: tuple[str, ...]
+
+
+def _message_text(message: dict) -> str:
+	"""Flatten a transcript message's `content` to text.
+
+	`content` is a bare string on a user turn and a list of typed blocks on an
+	assistant turn; a tool call has no prose, so it is named instead.
+	"""
+	content = message.get("content")
+	if isinstance(content, str):
+		return content
+	if not isinstance(content, list):
+		return ""
+	parts: list[str] = []
+	for block in content:
+		if isinstance(block, str):
+			parts.append(block)
+		elif isinstance(block, dict):
+			kind = block.get("type")
+			if kind == "text":
+				parts.append(str(block.get("text") or ""))
+			elif kind == "tool_use":
+				parts.append(f"⚙ {block.get('name') or 'tool'}")
+	return " ".join(part for part in parts if part)
+
+
+def _parse_subagent(path: str, tail: int) -> Subagent | None:
+	"""One `agent-<id>.jsonl` transcript folded into a `Subagent`, or None.
+
+	Never raises: an unreadable or half-written file drops out, and the tile it
+	would have filled degrades to the count line rather than the grid failing.
+	"""
+	try:
+		with open(path, encoding="utf-8") as handle:
+			raw = handle.readlines()
+	except OSError:
+		return None
+	agent_id = ""
+	task = ""
+	activity: list[str] = []
+	for line in raw:
+		line = line.strip()
+		if not line:
+			continue
+		try:
+			entry = json.loads(line)
+		except json.JSONDecodeError:
+			continue
+		if not isinstance(entry, dict):
+			continue
+		agent_id = agent_id or str(entry.get("agentId") or "")
+		message = entry.get("message")
+		if not isinstance(message, dict):
+			continue
+		text = _message_text(message)
+		if not text:
+			continue
+		if message.get("role") == "user":
+			if not task:
+				task = text
+		elif message.get("role") == "assistant":
+			activity.append(text)
+	if not agent_id:
+		# Fall back to the id in the filename: agent-<id>.jsonl.
+		stem = Path(path).stem
+		agent_id = stem.removeprefix("agent-")
+	return Subagent(id=agent_id, task=task, events=tuple(activity[-tail:]))
+
+
+def load_subagents(session_id: str, home: Path | None = None, *, limit: int = 6, tail: int = 4) -> tuple[Subagent, ...]:
+	"""The subagents of `session_id`, most recently active first.
+
+	Reads `~/.claude/projects/*/<session_id>/subagents/agent-*.jsonl` -- the
+	durable copy in the tree bv already trusts, not the volatile `/tmp` one.
+	Globbed by session id so the cwd-encoded project directory name never has
+	to be reconstructed. Newest `limit` files only: a long-running session
+	accumulates finished subagents, and the tiles are for the live ones.
+
+	The transcript format is internal to Claude Code and may move between
+	releases; this reads it defensively and an empty result simply falls back
+	to the `inFlight.tasks` count. Never raises.
+	"""
+	if not session_id:
+		return ()
+	root = home or claude_home()
+	pattern = str(root / "projects" / "*" / session_id / "subagents" / "agent-*.jsonl")
+	try:
+		paths = glob.glob(pattern)
+	except OSError:
+		return ()
+
+	def _mtime(path: str) -> float:
+		try:
+			return os.path.getmtime(path)
+		except OSError:
+			return 0.0
+
+	paths.sort(key=_mtime, reverse=True)
+	subagents = [_parse_subagent(path, tail) for path in paths[:limit]]
+	return tuple(sub for sub in subagents if sub is not None)
 
 
 def sessions_within(sessions: Iterable[Session], root: Path) -> list[Session]:

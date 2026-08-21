@@ -194,6 +194,52 @@ def test_a_session_composing_a_reply_reads_working_not_needs_input(tmp_path, mon
 	drive(home, root, scenario, monkeypatch)
 
 
+def write_subagent(home: Path, session_id: str, agent_id: str, *entries: dict) -> None:
+	sub = home / "projects" / "proj" / session_id / "subagents"
+	sub.mkdir(parents=True, exist_ok=True)
+	(sub / f"agent-{agent_id}.jsonl").write_text(
+		"\n".join(json.dumps({"agentId": agent_id, **e}) for e in entries) + "\n"
+	)
+
+
+def test_a_session_with_subagents_tiles_them(tmp_path, monkeypatch):
+	"""bv-xv9s: each in-process subagent gets its own tile inside the parent,
+
+	labelled with its task and showing recent activity.
+	"""
+	home = tmp_path / "claude"
+	root = tmp_path / "proj"
+	root.mkdir()
+	write_job(
+		home,
+		"aaaa",
+		str(root),
+		name="parent agent",
+		state="working",
+		sessionId="sess-1",
+		inFlight={"tasks": 1, "kinds": ["local_agent"]},
+	)
+	write_subagent(
+		home,
+		"sess-1",
+		"a1",
+		{"type": "user", "message": {"role": "user", "content": "Extract tactics"}},
+		{
+			"type": "assistant",
+			"message": {"role": "assistant", "content": [{"type": "text", "text": "wrote extraction"}]},
+		},
+	)
+	write_roster(home, "aaaa")
+
+	async def scenario(screen, pilot):
+		text = painted(screen)
+		# The task titles the tile; the recent activity fills its body.
+		assert "Extract tactics" in text
+		assert "wrote extraction" in text
+
+	drive(home, root, scenario, monkeypatch)
+
+
 def test_an_empty_project_says_so_rather_than_crashing(tmp_path, monkeypatch):
 	home = tmp_path / "claude"
 	root = tmp_path / "proj"

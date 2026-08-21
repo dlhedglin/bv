@@ -22,6 +22,7 @@ from bv.agents import (
 	display_state,
 	load_activity,
 	load_sessions,
+	load_subagents,
 	session_name_for,
 	session_within,
 	sessions_within,
@@ -44,6 +45,22 @@ def write_timeline(home: Path, short: str, *lines: str) -> None:
 def event(**fields: Any) -> str:
 	base = {"at": "2026-08-21T17:20:03.293Z", "state": "working", "detail": "", "text": ""}
 	return json.dumps({**base, **fields})
+
+
+def write_subagent(home: Path, session_id: str, agent_id: str, *entries: dict, project: str = "proj") -> Path:
+	sub = home / "projects" / project / session_id / "subagents"
+	sub.mkdir(parents=True, exist_ok=True)
+	path = sub / f"agent-{agent_id}.jsonl"
+	path.write_text("\n".join(json.dumps({"agentId": agent_id, **e}) for e in entries) + "\n")
+	return path
+
+
+def user_turn(text: str) -> dict:
+	return {"type": "user", "message": {"role": "user", "content": text}}
+
+
+def assistant_turn(*blocks: dict) -> dict:
+	return {"type": "assistant", "message": {"role": "assistant", "content": list(blocks)}}
 
 
 def write_roster(home: Path, *shorts: str) -> None:
@@ -147,6 +164,51 @@ def test_sessions_within_lists_a_projects_sessions_live_first(tmp_path):
 	# Live sessions (busy) lead; the dead one trails.
 	assert shorts[-1] == "c"
 	assert set(shorts[:2]) == {"a", "b"}
+
+
+# -- subagents ------------------------------------------------------------
+
+
+def test_a_subagent_is_read_task_first_then_activity(tmp_path):
+	write_subagent(
+		tmp_path,
+		"sess-1",
+		"a1",
+		user_turn("Read the transcript and extract tactics"),
+		assistant_turn({"type": "text", "text": "reading"}, {"type": "tool_use", "name": "Bash"}),
+		assistant_turn({"type": "text", "text": "done, wrote the extraction"}),
+	)
+	subs = load_subagents("sess-1", tmp_path)
+	assert len(subs) == 1
+	sub = subs[0]
+	assert sub.id == "a1"
+	assert sub.task == "Read the transcript and extract tactics"
+	# Assistant turns become the feed; a tool call is named, text kept.
+	assert sub.events[0] == "reading ⚙ Bash"
+	assert sub.events[-1] == "done, wrote the extraction"
+
+
+def test_subagents_of_an_unknown_or_blank_session_are_empty(tmp_path):
+	assert load_subagents("", tmp_path) == ()
+	assert load_subagents("nope", tmp_path) == ()
+
+
+def test_a_corrupt_subagent_line_is_skipped_not_fatal(tmp_path):
+	path = write_subagent(tmp_path, "sess-1", "a1", user_turn("do X"))
+	path.write_text('{"agentId":"a1","type":"user","message":{"role":"user","content":"do X"}}\n{bad json\n')
+	subs = load_subagents("sess-1", tmp_path)
+	assert len(subs) == 1
+	assert subs[0].task == "do X"
+
+
+def test_load_subagents_keeps_the_newest_within_the_limit(tmp_path):
+	import os
+
+	for i in range(4):
+		p = write_subagent(tmp_path, "sess-1", f"a{i}", user_turn(f"task {i}"))
+		os.utime(p, (1000 + i, 1000 + i))  # a3 newest
+	subs = load_subagents("sess-1", tmp_path, limit=2)
+	assert [s.id for s in subs] == ["a3", "a2"]
 
 
 # -- state reconciled with tempo ------------------------------------------

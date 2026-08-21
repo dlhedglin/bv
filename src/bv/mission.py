@@ -16,7 +16,9 @@ import math
 from pathlib import Path
 from typing import ClassVar
 
+from rich.columns import Columns
 from rich.console import Group, RenderableType
+from rich.panel import Panel
 from rich.text import Text
 from textual.app import ComposeResult
 from textual.binding import Binding, BindingType
@@ -27,9 +29,11 @@ from textual.widgets import Static
 from .agents import (
 	Activity,
 	Session,
+	Subagent,
 	display_state,
 	load_activity,
 	load_sessions,
+	load_subagents,
 	sessions_within,
 )
 
@@ -92,7 +96,39 @@ def _flatten(text: str) -> str:
 	return one if len(one) <= _LINE_CAP else one[: _LINE_CAP - 1] + "…"
 
 
-def render_panel(session: Session, activity: Activity | None) -> RenderableType:
+_SUB_EVENTS_SHOWN = 3
+"""Activity lines per subagent tile. A subagent is a glance-within-a-glance;
+its parent panel already carries the fuller feed."""
+
+_SUB_LINE_CAP = 90
+"""Characters per subagent line -- tighter than the parent feed so the tiles
+stay short and pack several across a pane rather than each forcing its width."""
+
+
+def render_subagent(sub: Subagent) -> RenderableType:
+	"""One subagent as a bordered tile: its task for a title, recent work below."""
+	lines: list[RenderableType] = []
+	for event in sub.events[-_SUB_EVENTS_SHOWN:]:
+		one = _flatten(event)
+		if len(one) > _SUB_LINE_CAP:
+			one = one[: _SUB_LINE_CAP - 1] + "…"
+		row = Text("› ", style="dim")
+		row.append(one)
+		lines.append(row)
+	body: RenderableType = Group(*lines) if lines else Text("…", style="dim")
+	title = _flatten(sub.task)
+	if len(title) > 34:
+		title = title[:33] + "…"
+	return Panel(
+		body,
+		title=title or sub.id[-6:],
+		title_align="left",
+		border_style="#5f5f5f",
+		padding=(0, 1),
+	)
+
+
+def render_panel(session: Session, activity: Activity | None, subagents: tuple[Subagent, ...] = ()) -> RenderableType:
 	"""The contents of one agent panel: a header line, then the recent feed.
 
 	`activity` is None when the session's state file cannot be read this tick
@@ -150,6 +186,12 @@ def render_panel(session: Session, activity: Activity | None) -> RenderableType:
 	if not feed and activity.result:
 		lines.append(Text(activity.result, style="dim"))
 
+	# Subagents as their own tiles, wrapping within the pane like the grid one
+	# level up. The meta line above still counts them, so a session with more
+	# subagents than tiles read here (finished ones drop off) still says so.
+	if subagents:
+		lines.append(Columns([render_subagent(sub) for sub in subagents], expand=True, equal=True))
+
 	return Group(*lines)
 
 
@@ -164,9 +206,9 @@ class AgentPanel(VerticalScroll):
 	def compose(self) -> ComposeResult:
 		yield self._body
 
-	def update(self, session: Session, activity: Activity | None) -> None:
+	def update(self, session: Session, activity: Activity | None, subagents: tuple[Subagent, ...] = ()) -> None:
 		"""Repaint in place; keep the widget so focus and scroll survive a poll."""
-		self._body.update(render_panel(session, activity))
+		self._body.update(render_panel(session, activity, subagents))
 		state = display_state(activity.state, activity.tempo) if activity else session.display_state
 		self.set_classes(_state_class(state))
 
@@ -271,6 +313,18 @@ class MissionControl(ModalScreen[None]):
 	def _current(self) -> list[Session]:
 		return sessions_within(load_sessions(), self._project_root)
 
+	def _paint(self, panel: AgentPanel, session: Session) -> None:
+		"""Load a session's activity (and subagents, when it has any) and repaint.
+
+		Subagent files are read only when the snapshot says tasks are in flight,
+		so a session with none never pays for the glob.
+		"""
+		activity = load_activity(session.short)
+		subagents: tuple[Subagent, ...] = ()
+		if activity and activity.subagents:
+			subagents = load_subagents(session.session_id, limit=activity.subagents or 6)
+		panel.update(session, activity, subagents)
+
 	async def _refresh(self) -> None:
 		"""Reconcile the grid with what is running under the project now."""
 		sessions = self._current()
@@ -283,7 +337,7 @@ class MissionControl(ModalScreen[None]):
 		else:
 			for session in sessions:
 				panel = self.query_one(f"#agent-{session.short}", AgentPanel)
-				panel.update(session, load_activity(session.short))
+				self._paint(panel, session)
 
 		self.query_one("#agents-title", Static).update(self._title_text())
 
@@ -304,4 +358,4 @@ class MissionControl(ModalScreen[None]):
 		panels = [AgentPanel(session) for session in sessions]
 		await grid.mount(*panels)
 		for panel, session in zip(panels, sessions):
-			panel.update(session, load_activity(session.short))
+			self._paint(panel, session)
