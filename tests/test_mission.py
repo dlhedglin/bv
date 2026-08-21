@@ -269,14 +269,17 @@ def test_a_panel_pins_to_the_latest_activity(tmp_path):
 			yield panel
 
 	async def main() -> None:
+		from textual.containers import VerticalScroll
+
 		app = Solo()
 		async with app.run_test(size=(40, 30)) as pilot:
-			panel.styles.height = 4  # smaller than the content, forcing overflow
+			panel.styles.height = 6  # smaller than header + feed, forcing the feed to overflow
 			panel.update(session, activity)
 			await pilot.pause()
 			await pilot.pause()
-			assert panel.max_scroll_y > 0, "content did not overflow, test proves nothing"
-			assert panel.scroll_offset.y == panel.max_scroll_y, "pane not pinned to the bottom"
+			feed = panel.query_one(".agent-feed", VerticalScroll)
+			assert feed.max_scroll_y > 0, "feed did not overflow, test proves nothing"
+			assert feed.scroll_offset.y == feed.max_scroll_y, "feed not pinned to the bottom"
 
 	asyncio.run(main())
 

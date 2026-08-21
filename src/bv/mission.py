@@ -22,7 +22,7 @@ from rich.panel import Panel
 from rich.text import Text
 from textual.app import ComposeResult
 from textual.binding import Binding, BindingType
-from textual.containers import Grid, VerticalScroll
+from textual.containers import Grid, Vertical, VerticalScroll
 from textual.screen import ModalScreen
 from textual.widgets import Static
 
@@ -128,13 +128,11 @@ def render_subagent(sub: Subagent) -> RenderableType:
 	)
 
 
-def render_panel(session: Session, activity: Activity | None, subagents: tuple[Subagent, ...] = ()) -> RenderableType:
-	"""The contents of one agent panel: a header line, then the recent feed.
+def render_header(session: Session, activity: Activity | None) -> RenderableType:
+	"""The fixed top of a panel: who it is, its state, tokens, subagent count.
 
-	`activity` is None when the session's state file cannot be read this tick
-	(mid-write, just gone) -- the panel keeps its frame and says so rather than
-	vanishing, because a session blinking out of the grid every few polls is
-	worse than one stale line.
+	Kept apart from the feed so it stays put while the body tails -- the pane's
+	identity should never scroll out of sight.
 	"""
 	# What it is doing now, not the milestone it last declared: a session in a
 	# question loop stays `state=blocked` while it composes replies, and the
@@ -151,7 +149,7 @@ def render_panel(session: Session, activity: Activity | None, subagents: tuple[S
 		badge.append("  (ended)", style="dim")
 
 	if activity is None:
-		return Group(badge, Text("…", style="dim"))
+		return badge
 
 	meta = Text()
 	meta.append(f"{_tokens(activity.tokens)} tok", style="dim")
@@ -166,7 +164,18 @@ def render_panel(session: Session, activity: Activity | None, subagents: tuple[S
 	lines: list[RenderableType] = [badge, meta]
 	if activity.detail:
 		lines.append(Text(activity.detail, style="italic"))
+	return Group(*lines)
 
+
+def render_body(activity: Activity | None, subagents: tuple[Subagent, ...] = ()) -> RenderableType:
+	"""The tailing part of a panel: the recent feed, then the subagent tiles.
+
+	This is what scrolls to the bottom; the header above it does not.
+	"""
+	if activity is None:
+		return Text("…", style="dim")
+
+	lines: list[RenderableType] = []
 	feed = activity.events[-_EVENTS_SHOWN:]
 	for event in feed:
 		clock = event.at[11:16] if len(event.at) >= 16 else ""
@@ -187,40 +196,45 @@ def render_panel(session: Session, activity: Activity | None, subagents: tuple[S
 		lines.append(Text(activity.result, style="dim"))
 
 	# Subagents as their own tiles, wrapping within the pane like the grid one
-	# level up. The meta line above still counts them, so a session with more
+	# level up. The header above still counts them, so a session with more
 	# subagents than tiles read here (finished ones drop off) still says so.
 	if subagents:
 		lines.append(Columns([render_subagent(sub) for sub in subagents], expand=True, equal=True))
 
-	return Group(*lines)
+	return Group(*lines) if lines else Text("")
 
 
-class AgentPanel(VerticalScroll):
-	"""One session's live cell.
+class AgentPanel(Vertical):
+	"""One session's live cell: a fixed header over a tailing feed.
 
-	It clips rather than growing the grid, and it is not a thing to scroll
-	through by hand -- this is an overhead glance, so the scrollbar is hidden
-	(CSS) and every repaint pins the view to the bottom, keeping the newest
-	activity in sight the way `tail -f` does.
+	The header carries the pane's identity and state and never moves. The feed
+	below it is an overhead glance, not a document to scroll by hand -- its
+	scrollbar is hidden (CSS) and every repaint pins it to the bottom, keeping
+	the newest activity in sight the way `tail -f` does, without dragging the
+	title off with it.
 	"""
 
 	def __init__(self, session: Session) -> None:
 		super().__init__(id=f"agent-{session.short}", classes=_state_class(session.display_state))
 		self._short = session.short
+		self._header = Static(classes="agent-head")
 		self._body = Static()
+		self._feed = VerticalScroll(self._body, classes="agent-feed")
 
 	def compose(self) -> ComposeResult:
-		yield self._body
+		yield self._header
+		yield self._feed
 
 	def update(self, session: Session, activity: Activity | None, subagents: tuple[Subagent, ...] = ()) -> None:
 		"""Repaint in place; keep the widget so focus survives a poll."""
-		self._body.update(render_panel(session, activity, subagents))
+		self._header.update(render_header(session, activity))
+		self._body.update(render_body(activity, subagents))
 		state = display_state(activity.state, activity.tempo) if activity else session.display_state
 		self.set_classes(_state_class(state))
-		# After the new content lays out, drop to the bottom so the latest line
-		# shows. `call_after_refresh`, not an immediate scroll: the virtual size
-		# only grows once the Static has re-rendered.
-		self.call_after_refresh(self.scroll_end, animate=False)
+		# After the new content lays out, drop the feed to the bottom so the
+		# latest line shows. `call_after_refresh`, not an immediate scroll: the
+		# virtual size only grows once the Static has re-rendered.
+		self._feed.call_after_refresh(self._feed.scroll_end, animate=False)
 
 
 class MissionControl(ModalScreen[None]):
@@ -271,9 +285,18 @@ class MissionControl(ModalScreen[None]):
             /* grey37, not $text-muted: border rejects a derived alpha colour,
                and only the live states earn a theme accent anyway. */
             border: round #5f5f5f;
-            /* An overhead view, not a document to scroll: no bar. The panel
-               still scrolls programmatically so each repaint can pin to the
-               bottom. */
+        }
+
+        /* The identity line stays put; only the feed below it tails. */
+        & .agent-head {
+            height: auto;
+            margin-bottom: 1;
+        }
+
+        & .agent-feed {
+            height: 1fr;
+            /* An overhead view, not a document to scroll: no bar. The feed
+               still scrolls programmatically so each repaint pins the bottom. */
             scrollbar-size: 0 0;
         }
 
