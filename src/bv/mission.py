@@ -48,6 +48,17 @@ _BADGE_STYLE = {
 	"done": "dim",
 }
 
+# What each state is called in the badge. `blocked` is Claude Code's own word
+# for it, but from a watcher's seat the fact is that the agent is waiting on
+# them -- so it reads "needs input", the same phrase the toast uses.
+_STATE_LABEL = {
+	"working": "working",
+	"blocked": "needs input",
+	"failed": "failed",
+	"stopped": "stopped",
+	"done": "done",
+}
+
 _EVENTS_SHOWN = 8
 """Timeline lines per panel. Enough to read the shape of what a session is
 doing without the panel needing to scroll on a normal terminal."""
@@ -92,7 +103,7 @@ def render_panel(session: Session, activity: Activity | None) -> RenderableType:
 	badge = Text()
 	badge.append(session.name or session.short, style="bold")
 	badge.append("  ")
-	badge.append(state or "?", style=_BADGE_STYLE.get(state, "dim"))
+	badge.append(_STATE_LABEL.get(state, state or "?"), style=_BADGE_STYLE.get(state, "dim"))
 	if not session.live:
 		badge.append("  (ended)", style="dim")
 

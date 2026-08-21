@@ -581,3 +581,53 @@ def test_mission_control_bells_when_the_cursor_is_on_no_project(tmp_path):
 		assert not any(isinstance(s, MissionControl) for s in app.screen_stack)
 
 	drive(tmp_path, scenario)
+
+
+# -- the "needs input" toast ----------------------------------------------
+
+# _announce_needs_input is exercised directly, not through the poll: it reads
+# self._sessions and the board root, and driving it by hand keeps the test off
+# the real ~/.claude while still crossing the transition it fires on.
+
+
+def _muted(root: Path, monkeypatch) -> tuple[BeansViewer, list]:
+	app = BeansViewer(root=root)
+	toasts: list = []
+	monkeypatch.setattr(app, "notify", lambda message, **kwargs: toasts.append((message, kwargs.get("title"))))
+	monkeypatch.setattr(app, "bell", lambda: None)
+	return app, toasts
+
+
+def _session(cwd: Path, state: str) -> Session:
+	return Session(short="a", name="agent A", state=state, cwd=str(cwd), live=True)
+
+
+def test_a_session_that_starts_waiting_raises_one_toast(tmp_path, monkeypatch):
+	app, toasts = _muted(tmp_path, monkeypatch)
+	# First read seeds the set silently.
+	app._sessions = [_session(tmp_path, "working")]
+	app._announce_needs_input()
+	assert toasts == []
+	# The agent blocks -> exactly one toast, titled for the watcher.
+	app._sessions = [_session(tmp_path, "blocked")]
+	app._announce_needs_input()
+	assert toasts == [("agent A", "needs input")]
+	# Still waiting on the next poll -> no repeat.
+	app._announce_needs_input()
+	assert len(toasts) == 1
+
+
+def test_a_session_already_waiting_at_startup_is_not_announced(tmp_path, monkeypatch):
+	app, toasts = _muted(tmp_path, monkeypatch)
+	app._sessions = [_session(tmp_path, "blocked")]
+	app._announce_needs_input()
+	assert toasts == []
+
+
+def test_a_waiting_session_outside_the_board_is_ignored(tmp_path, monkeypatch):
+	app, toasts = _muted(tmp_path, monkeypatch)
+	app._sessions = []
+	app._announce_needs_input()  # seed
+	app._sessions = [_session(Path("/somewhere/else"), "blocked")]
+	app._announce_needs_input()
+	assert toasts == []

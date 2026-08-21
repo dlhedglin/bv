@@ -155,6 +155,25 @@ def test_a_panel_shows_the_agents_output_not_just_status(tmp_path, monkeypatch):
 	drive(home, root, scenario, monkeypatch)
 
 
+def test_a_waiting_session_reads_needs_input(tmp_path, monkeypatch):
+	"""The badge names the state from the watcher's seat: `blocked` -> the
+
+	agent needs input. The raw word never reaches the panel.
+	"""
+	home = tmp_path / "claude"
+	root = tmp_path / "proj"
+	root.mkdir()
+	write_job(home, "aaaa", str(root), name="bv-9gnt · Agents view", state="blocked")
+	write_roster(home, "aaaa")
+
+	async def scenario(screen, pilot):
+		text = painted(screen)
+		assert "needs input" in text
+		assert "blocked" not in text
+
+	drive(home, root, scenario, monkeypatch)
+
+
 def test_an_empty_project_says_so_rather_than_crashing(tmp_path, monkeypatch):
 	home = tmp_path / "claude"
 	root = tmp_path / "proj"

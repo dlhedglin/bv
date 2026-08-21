@@ -265,6 +265,11 @@ class BeansViewer(App):
 		self._show_archived = False
 		self._sessions: list[Session] = []
 		self._working: dict[str, Attribution] = {}
+		# Shorts of sessions under this board that are currently waiting on the
+		# user, so a fresh block raises one toast and a still-blocked session
+		# stays quiet. `None` until the first read, which seeds without firing
+		# -- a session already blocked when bv starts is not news.
+		self._needs_input: set[str] | None = None
 		self._board = False
 
 	def check_action(self, action: str, parameters: tuple[object, ...]) -> bool | None:
@@ -928,7 +933,33 @@ class BeansViewer(App):
 			self._sessions,
 			((bean.id, self._project_root(bean.project), bean.status == "in-progress") for bean in self._beans),
 		)
+		self._announce_needs_input()
 		return self._session_render_state() != previous
+
+	def _announce_needs_input(self) -> None:
+		"""Toast once when a session under this board starts waiting on the user.
+
+		Runs on the 0.5 s poll, so a background agent that blocks for input is
+		seen without the grid open. Only sessions inside the board root count --
+		bv can see every job on the machine, and a toast for an unrelated repo's
+		agent is noise. Fires on the transition into `blocked`, not while it
+		stays there.
+		"""
+		root = resolved(self.root)
+		blocked = {
+			session.short: session
+			for session in self._sessions
+			if session.is_busy and session.state == "blocked" and (root is None or _session_within(session, root))
+		}
+		if self._needs_input is None:
+			# First read: adopt the current set silently. What was already
+			# waiting when bv launched is not a new event.
+			self._needs_input = set(blocked)
+			return
+		for short in blocked.keys() - self._needs_input:
+			self.bell()
+			self.notify(blocked[short].name, title="needs input", severity="warning")
+		self._needs_input = set(blocked)
 
 	def _session_render_state(self) -> tuple[object, ...]:
 		"""Everything the Agent column and the coarse agent tier paint from the
