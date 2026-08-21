@@ -196,7 +196,13 @@ def render_panel(session: Session, activity: Activity | None, subagents: tuple[S
 
 
 class AgentPanel(VerticalScroll):
-	"""One session's live cell. A scroll so a long feed never breaks the grid."""
+	"""One session's live cell.
+
+	It clips rather than growing the grid, and it is not a thing to scroll
+	through by hand -- this is an overhead glance, so the scrollbar is hidden
+	(CSS) and every repaint pins the view to the bottom, keeping the newest
+	activity in sight the way `tail -f` does.
+	"""
 
 	def __init__(self, session: Session) -> None:
 		super().__init__(id=f"agent-{session.short}", classes=_state_class(session.display_state))
@@ -207,10 +213,14 @@ class AgentPanel(VerticalScroll):
 		yield self._body
 
 	def update(self, session: Session, activity: Activity | None, subagents: tuple[Subagent, ...] = ()) -> None:
-		"""Repaint in place; keep the widget so focus and scroll survive a poll."""
+		"""Repaint in place; keep the widget so focus survives a poll."""
 		self._body.update(render_panel(session, activity, subagents))
 		state = display_state(activity.state, activity.tempo) if activity else session.display_state
 		self.set_classes(_state_class(state))
+		# After the new content lays out, drop to the bottom so the latest line
+		# shows. `call_after_refresh`, not an immediate scroll: the virtual size
+		# only grows once the Static has re-rendered.
+		self.call_after_refresh(self.scroll_end, animate=False)
 
 
 class MissionControl(ModalScreen[None]):
@@ -261,6 +271,10 @@ class MissionControl(ModalScreen[None]):
             /* grey37, not $text-muted: border rejects a derived alpha colour,
                and only the live states earn a theme accent anyway. */
             border: round #5f5f5f;
+            /* An overhead view, not a document to scroll: no bar. The panel
+               still scrolls programmatically so each repaint can pin to the
+               bottom. */
+            scrollbar-size: 0 0;
         }
 
         & .agent--working { border: round $success; }

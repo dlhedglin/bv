@@ -17,6 +17,7 @@ from textual.app import App, ComposeResult
 from textual.geometry import Region
 from textual.widgets import Static
 
+from bv.agents import Activity, Session, TimelineEvent
 from bv.mission import AgentPanel, MissionControl
 
 
@@ -238,6 +239,46 @@ def test_a_session_with_subagents_tiles_them(tmp_path, monkeypatch):
 		assert "wrote extraction" in text
 
 	drive(home, root, scenario, monkeypatch)
+
+
+def test_a_panel_pins_to_the_latest_activity(tmp_path):
+	"""An overhead glance shows the newest line: a pane taller than its box
+
+	scrolls itself to the bottom rather than stranding the latest activity
+	below the fold.
+	"""
+	session = Session(short="a", name="agent", state="working", cwd="/x", live=True, tempo="active")
+	events = tuple(
+		TimelineEvent(at=f"2026-08-21T17:0{i}:00Z", state="working", detail="", text=f"line {i}") for i in range(8)
+	)
+	activity = Activity(
+		short="a",
+		state="working",
+		detail="working",
+		tempo="active",
+		tokens=100,
+		subagents=0,
+		child_kinds=(),
+		result="",
+		events=events,
+	)
+	panel = AgentPanel(session)
+
+	class Solo(App):
+		def compose(self) -> ComposeResult:
+			yield panel
+
+	async def main() -> None:
+		app = Solo()
+		async with app.run_test(size=(40, 30)) as pilot:
+			panel.styles.height = 4  # smaller than the content, forcing overflow
+			panel.update(session, activity)
+			await pilot.pause()
+			await pilot.pause()
+			assert panel.max_scroll_y > 0, "content did not overflow, test proves nothing"
+			assert panel.scroll_offset.y == panel.max_scroll_y, "pane not pinned to the bottom"
+
+	asyncio.run(main())
 
 
 def test_an_empty_project_says_so_rather_than_crashing(tmp_path, monkeypatch):
