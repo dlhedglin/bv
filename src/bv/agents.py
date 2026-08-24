@@ -19,6 +19,7 @@ Nothing here writes. Sessions are observed, never controlled.
 
 from __future__ import annotations
 
+import glob
 import json
 import os
 from collections.abc import Iterable
@@ -49,6 +50,27 @@ def claude_home() -> Path:
 	return Path.home() / ".claude"
 
 
+def display_state(state: str, tempo: str) -> str:
+	"""What a session is *doing now*, reconciling its two clocks.
+
+	`state` is the milestone the agent last declared; it lags. `tempo` is the
+	daemon's live read of motion. They disagree during a question-and-answer
+	loop: the agent declares `blocked` when it asks, and `state` stays there
+	for the whole exchange while `tempo` swings `active` (composing a reply)
+	and `blocked` (waiting on the user). Trust the live clock:
+
+	- `active`  -- producing output right now, so: working, whatever `state` says.
+	- `blocked` -- genuinely waiting on the user: needs input.
+	- anything else (`idle`, unset) -- no motion to override with, so fall back
+	  to the declared `state` (a `done` session reads `done`, not `working`).
+	"""
+	if tempo == "active":
+		return "working"
+	if tempo == "blocked":
+		return "blocked"
+	return state
+
+
 @dataclass(frozen=True)
 class Session:
 	"""One Claude Code session, as far as bv is concerned."""
@@ -62,6 +84,13 @@ class Session:
 	# died without updating -- believing the file alone would show a ghost
 	# agent working a bean forever.
 	live: bool = False
+	# The daemon's live-motion clock (active/idle/blocked). Reconciled with the
+	# declared `state` by `display_state`; see there.
+	tempo: str = ""
+	# The conversation's UUID, which keys its transcript and subagent files
+	# under `~/.claude/projects/`. The `short` keys the job dir; the two are
+	# different names for the same session. See `load_subagents`.
+	session_id: str = ""
 
 	@property
 	def state_rank(self) -> int:
@@ -70,6 +99,16 @@ class Session:
 	@property
 	def is_busy(self) -> bool:
 		return self.live and self.state in BUSY_STATES
+
+	@property
+	def display_state(self) -> str:
+		"""`state` reconciled with `tempo`; see the module function."""
+		return display_state(self.state, self.tempo)
+
+	@property
+	def needs_input(self) -> bool:
+		"""Live and actually waiting on the user right now (not mid-reply)."""
+		return self.live and self.display_state == "blocked"
 
 
 def _read_json(path: Path) -> dict | None:
@@ -121,10 +160,253 @@ def load_sessions(home: Path | None = None) -> list[Session]:
 				state=payload.get("state") or "",
 				cwd=cwd,
 				live=entry.name in live,
+				tempo=payload.get("tempo") or "",
+				session_id=payload.get("sessionId") or "",
 			)
 		)
 	sessions.sort(key=lambda s: (s.state_rank, s.name))
 	return sessions
+
+
+@dataclass(frozen=True)
+class TimelineEvent:
+	"""One line of a session's `timeline.jsonl`.
+
+	`text` is the longer message body a session emits (a reply, a result); it
+	is empty for most status-only ticks, where `detail` alone moves.
+	"""
+
+	at: str
+	state: str
+	detail: str
+	text: str
+
+
+@dataclass(frozen=True)
+class Activity:
+	"""The live detail behind a `Session`, for the mission-control grid.
+
+	`load_sessions` answers *who is on what*; this answers *what are they
+	doing right now*. Same files, read only when a panel is open, because the
+	timeline tail costs more than the board's per-tick budget allows.
+	"""
+
+	short: str
+	state: str
+	detail: str
+	tempo: str
+	tokens: int
+	# Subagents in flight. `children` in state.json stays null even while a
+	# subagent runs, so `inFlight.tasks` (with its `kinds`) is the signal the
+	# panel trusts; `child_kinds` names them (e.g. "local_agent").
+	subagents: int
+	child_kinds: tuple[str, ...]
+	result: str
+	events: tuple[TimelineEvent, ...]
+
+
+def _as_int(value: object) -> int:
+	return value if isinstance(value, int) and not isinstance(value, bool) else 0
+
+
+def _tail_events(path: Path, limit: int) -> tuple[TimelineEvent, ...]:
+	"""The last `limit` well-formed lines of a `timeline.jsonl`, oldest first.
+
+	Never raises: a missing file, a truncated tail mid-write, or a stray
+	non-object line each drop to nothing rather than taking a panel down.
+	"""
+	try:
+		with path.open(encoding="utf-8") as handle:
+			lines = handle.readlines()
+	except OSError:
+		return ()
+	events: list[TimelineEvent] = []
+	for line in lines[-limit:]:
+		line = line.strip()
+		if not line:
+			continue
+		try:
+			payload = json.loads(line)
+		except json.JSONDecodeError:
+			continue
+		if not isinstance(payload, dict):
+			continue
+		events.append(
+			TimelineEvent(
+				at=str(payload.get("at") or ""),
+				state=str(payload.get("state") or ""),
+				detail=str(payload.get("detail") or ""),
+				text=str(payload.get("text") or ""),
+			)
+		)
+	return tuple(events)
+
+
+def load_activity(short: str, home: Path | None = None, *, tail: int = 12) -> Activity | None:
+	"""The live activity for one session `short`, or None if it cannot be read.
+
+	Reads the same `~/.claude/jobs/<short>/` bv already trusts: `state.json`
+	for the snapshot, `timeline.jsonl` for the rolling feed. Observe-only, like
+	the rest of this module -- nothing here writes or attaches.
+	"""
+	root = home or claude_home()
+	job = root / "jobs" / short
+	payload = _read_json(job / "state.json")
+	if payload is None:
+		return None
+	in_flight = payload.get("inFlight")
+	in_flight = in_flight if isinstance(in_flight, dict) else {}
+	kinds = in_flight.get("kinds")
+	child_kinds = tuple(str(k) for k in kinds) if isinstance(kinds, list) else ()
+	output = payload.get("output")
+	result = ""
+	if isinstance(output, dict):
+		result = str(output.get("result") or "")
+	return Activity(
+		short=short,
+		state=str(payload.get("state") or ""),
+		detail=str(payload.get("detail") or ""),
+		tempo=str(payload.get("tempo") or ""),
+		tokens=_as_int(payload.get("tokens")),
+		subagents=_as_int(in_flight.get("tasks")),
+		child_kinds=child_kinds,
+		result=result,
+		events=_tail_events(job / "timeline.jsonl", tail),
+	)
+
+
+@dataclass(frozen=True)
+class Subagent:
+	"""One in-process subagent (a Task/`local_agent`) of a session.
+
+	These are not daemon jobs -- they have no `state.json`, no roster entry --
+	so the session's `inFlight.tasks` only *counts* them. Their transcripts,
+	however, are written per-agent under the session's `~/.claude/projects`
+	directory, which is where the detail for a tile comes from.
+	"""
+
+	id: str
+	# The prompt the subagent was handed -- the best one-line answer to "what
+	# is this one doing", taken from its first user turn.
+	task: str
+	# Recent assistant activity (text and tool calls), oldest first.
+	events: tuple[str, ...]
+
+
+def _message_text(message: dict) -> str:
+	"""Flatten a transcript message's `content` to text.
+
+	`content` is a bare string on a user turn and a list of typed blocks on an
+	assistant turn; a tool call has no prose, so it is named instead.
+	"""
+	content = message.get("content")
+	if isinstance(content, str):
+		return content
+	if not isinstance(content, list):
+		return ""
+	parts: list[str] = []
+	for block in content:
+		if isinstance(block, str):
+			parts.append(block)
+		elif isinstance(block, dict):
+			kind = block.get("type")
+			if kind == "text":
+				parts.append(str(block.get("text") or ""))
+			elif kind == "tool_use":
+				parts.append(f"⚙ {block.get('name') or 'tool'}")
+	return " ".join(part for part in parts if part)
+
+
+def _parse_subagent(path: str, tail: int) -> Subagent | None:
+	"""One `agent-<id>.jsonl` transcript folded into a `Subagent`, or None.
+
+	Never raises: an unreadable or half-written file drops out, and the tile it
+	would have filled degrades to the count line rather than the grid failing.
+	"""
+	try:
+		with open(path, encoding="utf-8") as handle:
+			raw = handle.readlines()
+	except OSError:
+		return None
+	agent_id = ""
+	task = ""
+	activity: list[str] = []
+	for line in raw:
+		line = line.strip()
+		if not line:
+			continue
+		try:
+			entry = json.loads(line)
+		except json.JSONDecodeError:
+			continue
+		if not isinstance(entry, dict):
+			continue
+		agent_id = agent_id or str(entry.get("agentId") or "")
+		message = entry.get("message")
+		if not isinstance(message, dict):
+			continue
+		text = _message_text(message)
+		if not text:
+			continue
+		if message.get("role") == "user":
+			if not task:
+				task = text
+		elif message.get("role") == "assistant":
+			activity.append(text)
+	if not agent_id:
+		# Fall back to the id in the filename: agent-<id>.jsonl.
+		stem = Path(path).stem
+		agent_id = stem.removeprefix("agent-")
+	return Subagent(id=agent_id, task=task, events=tuple(activity[-tail:]))
+
+
+def load_subagents(session_id: str, home: Path | None = None, *, limit: int = 6, tail: int = 4) -> tuple[Subagent, ...]:
+	"""The subagents of `session_id`, most recently active first.
+
+	Reads `~/.claude/projects/*/<session_id>/subagents/agent-*.jsonl` -- the
+	durable copy in the tree bv already trusts, not the volatile `/tmp` one.
+	Globbed by session id so the cwd-encoded project directory name never has
+	to be reconstructed. Newest `limit` files only: a long-running session
+	accumulates finished subagents, and the tiles are for the live ones.
+
+	The transcript format is internal to Claude Code and may move between
+	releases; this reads it defensively and an empty result simply falls back
+	to the `inFlight.tasks` count. Never raises.
+	"""
+	if not session_id:
+		return ()
+	root = home or claude_home()
+	pattern = str(root / "projects" / "*" / session_id / "subagents" / "agent-*.jsonl")
+	try:
+		paths = glob.glob(pattern)
+	except OSError:
+		return ()
+
+	def _mtime(path: str) -> float:
+		try:
+			return os.path.getmtime(path)
+		except OSError:
+			return 0.0
+
+	paths.sort(key=_mtime, reverse=True)
+	subagents = [_parse_subagent(path, tail) for path in paths[:limit]]
+	return tuple(sub for sub in subagents if sub is not None)
+
+
+def sessions_within(sessions: Iterable[Session], root: Path) -> list[Session]:
+	"""The sessions running inside `root`, live ones first.
+
+	The mission-control grid's project filter: same `_within` test the coarse
+	attribution tier uses, but returned as a list rather than folded into a
+	single guess. Dead sessions trail live ones so a full grid leads with what
+	is still running.
+	"""
+	resolved_root = resolved(root)
+	if resolved_root is None:
+		return []
+	within = [s for s in sessions if session_within(s, resolved_root)]
+	within.sort(key=lambda s: (not s.is_busy, s.state_rank, s.name))
+	return within
 
 
 def resolved(path: str | Path) -> Path | None:
