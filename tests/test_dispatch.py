@@ -147,8 +147,24 @@ def test_the_prompt_tells_the_agent_to_close_it_only_when_it_is_really_done():
 	# to "I made the edits".
 	prompt = prompt_for(bean())
 	assert "beans update bv-9sxj --status completed" in prompt
-	assert "genuinely done" in prompt
+	# The close is gated on verifying the work against the bean rather than a
+	# bare "genuinely done": read the diff, judge against what actually
+	# changed, not intent. This is the BMAD build step's judge-against-the-diff
+	# gate, which replaced the older phrasing.
+	assert "read your diff" in prompt
+	assert "acceptance criterion" in prompt
 	assert "partial" in prompt and "say what is left" in prompt
+
+
+def test_the_prompt_tells_an_epic_to_walk_its_children_and_fan_out():
+	# An epic- or feature-shaped bean is told to list its children, order the
+	# work itself, and fan out with subagents on independent children. The
+	# children come from a `beans query` on the parent id, so the id alone is
+	# enough -- no need to know the child ids first.
+	prompt = prompt_for(bean())
+	assert 'beans query --json \'{ bean(id: "bv-9sxj")' in prompt
+	assert "children { id title status type priority }" in prompt
+	assert "subagents" in prompt
 
 
 def test_the_prompt_forbids_scrapping_the_bean():
@@ -230,9 +246,11 @@ def test_the_prompt_no_longer_scales_with_the_body():
 	huge = prompt_for(bean(body="x" * LARGEST_REAL_BODY))
 	assert huge == prompt_for(bean(body=""))
 	# Bounded by the title plus fixed instructions, so the ceiling is a constant
-	# regardless of the bean. It moved once already when bv-pg4k added the
-	# status instructions; the guard is that it stays a constant, not a number.
-	assert len(huge) < 1_000
+	# regardless of the bean. It moved once when bv-pg4k added the status
+	# instructions, and again when the verify-before-close gate and the
+	# children query landed; the guard is that it stays a constant, not a
+	# number.
+	assert len(huge) < 1_200
 
 
 # -- the request ----------------------------------------------------------
@@ -728,17 +746,21 @@ def test_a_title_full_of_brackets_is_shown_exactly_as_it_will_be_sent():
 	show(scenario, request(title=nasty))
 
 
-def test_the_dialog_no_longer_needs_to_scroll_for_a_huge_bean():
-	# It did: the prompt used to carry the whole body, up to 23,879 chars, and
-	# the pane's max-height had to be computed in Python so the hint line
-	# naming the escape key stayed on screen. Prompts are now bounded by the
-	# title, so on a normal terminal nothing scrolls -- but the fit logic
-	# stays, because a very short terminal can still push the hint off. This is
-	# also the guard on the prompt outgrowing the dialog: bv-pg4k made it three
-	# times longer, and a constant ceiling would have started clipping it.
+def test_the_dialog_keeps_the_hint_visible_when_the_prompt_scrolls():
+	# The prompt is still bounded by the title, not the body -- a huge body
+	# never reaches it. But it outgrew a single screen once the
+	# verify-before-close gate, the children query and the epic fan-out landed
+	# (~30 lines direct, ~36 in a worktree). It scrolls inside the pane now,
+	# which is accepted: the fit logic still caps the pane below the content so
+	# the hint naming the escape key stays on screen rather than being pushed
+	# off the bottom. That the hint survives a scrolling prompt is the guard
+	# that matters; nothing-scrolls was only ever true while the prompt was
+	# short.
 	async def scenario(app, screen, pilot):
 		pane = screen.query_one("#dispatch-prompt")
-		assert pane.max_scroll_y == 0
+		# The scenario actually exercises scrolling on a normal terminal...
+		assert pane.max_scroll_y > 0
+		# ...and the hint is still on screen despite it.
 		assert HINT in rendered(app)
 
 	show(scenario, request(body="x" * LARGEST_REAL_BODY))

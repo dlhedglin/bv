@@ -277,6 +277,27 @@ def prompt_for(bean: Bean, *, worktree: bool = False) -> str:
 
 	The stop rule extends to the write. A failed `beans update` is reported the
 	way a failed `beans show` is, rather than retried into some other status.
+
+	Before the completed write, the agent checks its work against the bean --
+	it reads its own diff and confirms each acceptance criterion is met by what
+	actually changed, not by what it set out to do. This is the BMAD build
+	step's "judge against the diff, not the report" gate, and it replaces the
+	older bare "genuinely done" line, which named the standard without giving
+	the agent a way to apply it. The criteria themselves are not restated in the
+	prompt -- they live in the bean the agent already reads, and BMAD's own
+	dispatch rule is that acceptance criteria belong in the spec, not the
+	handoff.
+
+	An epic- or feature-shaped bean, or any bean with children, is told to walk
+	those children and order the work itself, fanning out with subagents where
+	the children are independent. A `beans query` on the parent id returns the
+	children directly -- id, title, status, type, priority -- so this is a query
+	the agent can make from the id alone, without first knowing the child ids.
+
+	The prose is caveman-compressed to shrink the per-dispatch prompt, but every
+	command, the stop-on-failure line, the never-scrapped line and the
+	in-progress-before-completed order are kept verbatim: they are load-bearing
+	instructions where an omitted word changes what the agent does.
 	"""
 	header = f"Work bean {bean.id}"
 	title = _argv_safe(bean.title)
@@ -289,19 +310,26 @@ def prompt_for(bean: Bean, *, worktree: bool = False) -> str:
 		f"\n"
 		f"    {' '.join(show_command(bean.id))}\n"
 		f"\n"
-		f"That gives you the body, status, priority, tags and blockers. If the\n"
-		f"command fails, stop and say so -- do not infer the task from the title.\n"
+		f"Gives you body, status, priority, tags, blockers. If command\n"
+		f"fails, stop and say so -- do not infer the task from the title.\n"
+		f"\n"
+		f"If it is an epic or feature, or has children, list them:\n"
+		f"\n"
+		f"    beans query --json '{{ bean(id: \"{bean.id}\") {{ children {{ id title status type priority }} }} }}'\n"
+		f"\n"
+		f"Read each child, decide what to start first, and fan out with\n"
+		f"subagents where the children are independent.\n"
 	)
 	if worktree:
 		return head + (
 			f"\n"
-			f"You are running in an isolated git worktree on branch\n"
-			f"{branch_for(bean.id)}. Your edits do not touch the main checkout; they\n"
-			f"reach it only when this branch is merged, so nothing you do is visible\n"
-			f"on the board until then.\n"
+			f"You run in an isolated git worktree on branch {branch_for(bean.id)}.\n"
+			f"Your edits never touch the main checkout; they reach it only when this\n"
+			f"branch merges, so nothing you do is visible on the board until then.\n"
 			f"\n"
-			f"Do the work here. When it is genuinely done -- finished and passing,\n"
-			f"not merely edited -- mark the bean completed:\n"
+			f"Do the work here. Before closing, check your work against the bean:\n"
+			f"read your diff, confirm every acceptance criterion met by what you\n"
+			f"actually changed, not what you set out to do. Then mark completed:\n"
 			f"\n"
 			f"    {' '.join(update_command(bean.id, COMPLETED))}\n"
 			f"\n"
@@ -310,28 +338,28 @@ def prompt_for(bean: Bean, *, worktree: bool = False) -> str:
 			f"\n"
 			f'    git add -A && git commit -m "<what you did> ({bean.id})"\n'
 			f"\n"
-			f"If the work is partial, or something is failing, commit what you\n"
-			f"have, leave the bean {IN_PROGRESS}, and say what is left.\n"
-			f"Never set it to {SCRAPPED} -- that is not a call for you to make.\n"
-			f"If a `beans update` or the commit fails, stop and say so -- do not\n"
-			f"retry it into a different status. A human merges {branch_for(bean.id)}\n"
-			f"into the main checkout; do not merge it yourself."
+			f"If work partial, or something failing, commit what you have, leave\n"
+			f"the bean {IN_PROGRESS}, say what is left. Never set it to {SCRAPPED}\n"
+			f"-- not your call. If a `beans update` or the commit fails, stop and\n"
+			f"say so -- do not retry it into a different status. A human merges\n"
+			f"{branch_for(bean.id)} into the main checkout; do not merge it yourself."
 		)
 	return head + (
 		f"\n"
-		f"Then mark it started, before doing any of the work:\n"
+		f"Then mark it started, before any work:\n"
 		f"\n"
 		f"    {' '.join(update_command(bean.id, IN_PROGRESS))}\n"
 		f"\n"
-		f"Close it yourself when the work is genuinely done -- finished and\n"
-		f"passing, not merely edited:\n"
+		f"Before closing, check your work against the bean: read your diff,\n"
+		f"confirm every acceptance criterion met by what you actually changed,\n"
+		f"not what you set out to do. Only then:\n"
 		f"\n"
 		f"    {' '.join(update_command(bean.id, COMPLETED))}\n"
 		f"\n"
-		f"If the work is partial, or something is failing, leave the bean\n"
-		f"{IN_PROGRESS} and say what is left. Never set it to {SCRAPPED} -- that\n"
-		f"is not a call for you to make. If a `beans update` fails, stop and\n"
-		f"say so, the same as above -- do not retry it into a different status."
+		f"If work partial, or something failing, leave the bean {IN_PROGRESS},\n"
+		f"say what is left. Never set it to {SCRAPPED} -- not your call. If\n"
+		f"`beans update` fails, stop and say so, same as above --\n"
+		f"do not retry it into a different status."
 	)
 
 
