@@ -21,6 +21,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 from collections.abc import Callable, Iterable
+from functools import partial
 from pathlib import Path
 from typing import ClassVar
 
@@ -46,9 +47,12 @@ from .config import (
 from .dispatch import (
 	ConfirmDispatch,
 	DispatchRequest,
+	PickBase,
 	already_working,
 	can_dispatch,
+	current_branch,
 	dispatch,
+	local_branches,
 	request_for,
 )
 from .mission import MissionControl
@@ -594,15 +598,50 @@ class BeansViewer(App):
 	def action_spawn_worktree(self) -> None:
 		"""`W` -- start one in an isolated worktree instead.
 
-		The only difference from `S` is the `worktree` flag threaded into
-		`request_for`; everything after -- the confirmation, the spawn, the
-		attribution -- is the same path. Its work lands on the board only when
-		the branch the agent commits to is merged; see `dispatch.request_for`.
+		Unlike `S`, `W` asks *which branch to fork* before confirming: it opens
+		`PickBase` on the project's local branches, and the pick becomes the base
+		bv cuts the worktree from. Everything after the confirmation -- the spawn,
+		the attribution -- is the shared path. Its code lands on the board only
+		when the branch the agent commits to is merged; see `dispatch.request_for`.
+
+		The pick is skipped when there are no branches to offer -- not a git repo,
+		or unreadable -- and the cut falls through to HEAD, where `dispatch`
+		surfaces any git error in the confirmation the same way a bad base would.
 		"""
-		self._offer_dispatch(worktree=True)
+		self._pending_g = False
+		bean = self._current_bean()
+		if not can_dispatch(bean):
+			self.notify("no bean under the cursor", severity="information")
+			return
+		root = self._project_root(bean.project)
+		branches = local_branches(root)
+		if not branches:
+			self._confirm_worktree(bean, root, base=None)
+			return
+		self.push_screen(PickBase(branches, current_branch(root)), partial(self._base_picked, bean, root))
+
+	def _base_picked(self, bean: Bean, root: Path, base: str | None) -> None:
+		# None is escape out of the picker: the whole `W` is abandoned, nothing
+		# is confirmed and nothing spawns.
+		if base is not None:
+			self._confirm_worktree(bean, root, base=base)
+
+	def _confirm_worktree(self, bean: Bean, root: Path, *, base: str | None) -> None:
+		"""Show the `W` confirmation for a decided base, then spawn on enter."""
+		self.push_screen(
+			ConfirmDispatch(
+				request_for(bean, root, worktree=True, base=base),
+				warning=already_working(self._agent_on(bean)),
+			),
+			self._dispatch_confirmed,
+		)
 
 	def _offer_dispatch(self, *, worktree: bool) -> None:
-		"""Offer to start a background Claude session on the highlighted bean."""
+		"""Offer to start a background Claude session on the highlighted bean.
+
+		The `S` path. `W` goes through `action_spawn_worktree` for its base
+		picker; this stays the direct-dispatch entry `action_spawn` calls.
+		"""
 		self._pending_g = False
 		bean = self._current_bean()
 		if not can_dispatch(bean):

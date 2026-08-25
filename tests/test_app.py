@@ -25,6 +25,7 @@ from bv.agents import Session
 from bv.app import BeansViewer, resolve_root
 from bv.beans import Bean
 from bv.board import BeanBoard, BeanCard
+from bv.dispatch import ConfirmDispatch, PickBase
 from bv.mission import MissionControl
 from bv.preview import BeanPreview
 
@@ -569,6 +570,53 @@ def test_pressing_m_opens_mission_control_for_the_project(tmp_path):
 		assert not isinstance(app.screen, MissionControl)
 
 	drive(tmp_path, scenario)
+
+
+def test_pressing_w_picks_a_base_then_confirms_the_worktree(tmp_path, monkeypatch):
+	"""bv-9gnt. `W` asks which branch to fork before confirming, and the pick
+	rides into the dispatch as the base the worktree is cut from."""
+	root = make_project(tmp_path, "bv")
+	canned(monkeypatch, [_bean("bv-aaaa")])
+	# Stub the git reads so the test never depends on the machine's own repo.
+	monkeypatch.setattr("bv.app.local_branches", lambda _root: ["main", "feat/x"])
+	monkeypatch.setattr("bv.app.current_branch", lambda _root: "feat/x")
+
+	async def scenario(app, pilot):
+		await pilot.press("W")
+		await pilot.pause()
+		assert isinstance(app.screen, PickBase)
+		# Enter picks the highlighted row -- the checked-out branch.
+		await pilot.press("enter")
+		await pilot.pause()
+		assert isinstance(app.screen, ConfirmDispatch)
+		assert app.screen.request.worktree == "bv-aaaa"
+		assert app.screen.request.base == "feat/x"
+		# Escape out rather than spend tokens: nothing here may actually spawn.
+		await pilot.press("escape")
+		await pilot.pause()
+
+	drive(root, scenario)
+
+
+def test_pressing_w_with_no_branches_skips_the_picker(tmp_path, monkeypatch):
+	"""Not a git repo, or unreadable: the picker has nothing to show, so `W`
+	goes straight to the confirmation and lets the cut default to HEAD."""
+	root = make_project(tmp_path, "bv")
+	canned(monkeypatch, [_bean("bv-aaaa")])
+	monkeypatch.setattr("bv.app.local_branches", lambda _root: [])
+	monkeypatch.setattr("bv.app.current_branch", lambda _root: None)
+
+	async def scenario(app, pilot):
+		await pilot.press("W")
+		await pilot.pause()
+		assert not isinstance(app.screen, PickBase)
+		assert isinstance(app.screen, ConfirmDispatch)
+		assert app.screen.request.worktree == "bv-aaaa"
+		assert app.screen.request.base is None
+		await pilot.press("escape")
+		await pilot.pause()
+
+	drive(root, scenario)
 
 
 def test_mission_control_bells_when_the_cursor_is_on_no_project(tmp_path):

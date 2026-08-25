@@ -25,21 +25,26 @@ from bv.beans import Bean
 from bv.dispatch import (
 	CLAUDE,
 	COMPLETED,
+	GIT,
 	HINT,
 	IN_PROGRESS,
 	SCRAPPED,
 	TITLE,
 	ConfirmDispatch,
 	DispatchRequest,
+	PickBase,
 	already_working,
 	branch_for,
 	can_dispatch,
+	current_branch,
 	dispatch,
 	display_path,
+	local_branches,
 	prompt_for,
 	request_for,
 	show_command,
 	update_command,
+	worktree_path_for,
 )
 
 T0 = datetime(2026, 1, 1, tzinfo=UTC)
@@ -288,15 +293,49 @@ def test_a_w_dispatch_names_the_worktree_after_the_bean():
 	# matched back exactly the same way an `S` one is.
 	spawned = request_for(bean(), Path("/repos/bv"), worktree=True)
 	assert spawned.worktree == "bv-9sxj"
+	# bv cuts the worktree itself now, so the claude command carries no
+	# `--worktree`; it runs *in* the worktree and only has to reach the board.
+	assert "--worktree" not in spawned.command
 	assert spawned.command == [
 		CLAUDE,
 		"--bg",
-		"--worktree",
-		"bv-9sxj",
+		"--add-dir",
+		str(Path("/repos/bv") / ".beans"),
 		"--name",
 		spawned.session_name,
 		spawned.prompt,
 	]
+	# cwd is the worktree, not the checkout: that is where claude runs, and where
+	# `dispatch` will have git create the tree.
+	assert spawned.cwd == worktree_path_for(Path("/repos/bv"), "bv-9sxj")
+	assert spawned.project_root == Path("/repos/bv")
+
+
+def test_a_w_dispatch_carries_the_base_it_was_given():
+	# The base is the whole reason `PickBase` exists: the branch the worktree
+	# forks from, threaded straight through to `git worktree add`.
+	spawned = request_for(bean(), Path("/repos/bv"), worktree=True, base="main")
+	assert spawned.base == "main"
+
+
+def test_the_add_dir_points_at_the_board_not_the_whole_checkout():
+	# A git-ignored `.beans` is not checked out into the worktree, and the
+	# worktree is beside the checkout, not under it -- so the agent's `beans
+	# update` cannot write the board without this grant. Scoped to `.beans` on
+	# purpose: granting the whole root back would hand a `W` agent the main
+	# checkout's code, and isolating that is what `W` is for.
+	spawned = request_for(bean(), Path("/repos/bv"), worktree=True)
+	assert "--add-dir" in spawned.command
+	i = spawned.command.index("--add-dir")
+	assert spawned.command[i + 1] == str(Path("/repos/bv") / ".beans")
+	# Not the bare root.
+	assert spawned.command[i + 1] != str(Path("/repos/bv"))
+
+
+def test_an_s_dispatch_gets_no_add_dir():
+	# The checkout the `S` agent runs in already contains `.beans`; the grant is
+	# a `W`-only fix and would be noise on the common path.
+	assert "--add-dir" not in request_for(bean(), Path("/repos/bv")).command
 
 
 def test_the_branch_is_worktree_prefixed():
@@ -331,6 +370,19 @@ def test_the_confirmation_shows_the_branch_only_when_isolated():
 	assert "branch" not in summary_text(request_for(bean(), Path("/repos/bv"))).plain
 	isolated = summary_text(request_for(bean(), Path("/repos/bv"), worktree=True)).plain
 	assert branch_for("bv-9sxj") in isolated
+
+
+def test_the_confirmation_names_the_base_the_worktree_forks_from():
+	# The base is the picker's whole output; the dialog has to show it before the
+	# cut, so a wrong pick is caught where a wrong repo already is.
+	from bv.dispatch import summary_text
+
+	picked = summary_text(request_for(bean(), Path("/repos/bv"), worktree=True, base="release-2")).plain
+	assert "base" in picked and "release-2" in picked
+	# With no pick the cut defaults to HEAD, and the dialog says so rather than
+	# leaving the base line blank.
+	head = summary_text(request_for(bean(), Path("/repos/bv"), worktree=True)).plain
+	assert "HEAD" in head
 
 
 def test_a_project_heading_row_has_nothing_to_dispatch():
@@ -419,6 +471,91 @@ def test_an_unstartable_claude_binary_is_a_message_too(tmp_path):
 	result = dispatch(request(tmp_path), FakeRunner(raises=PermissionError("denied")))
 	assert not result.ok
 	assert "denied" in result.message
+
+
+# -- cutting the worktree -------------------------------------------------
+
+
+def test_a_w_dispatch_cuts_the_worktree_then_spawns_claude(tmp_path):
+	# Two subprocesses in order: bv cuts the tree in the checkout, then runs
+	# claude in the tree. Both go through the one injected runner.
+	runner = FakeRunner()
+	req = request_for(bean(), tmp_path, worktree=True, base="main")
+	result = dispatch(req, runner)
+	assert result.ok
+	assert len(runner.calls) == 2
+	(cut, cut_kwargs), (spawn, spawn_kwargs) = runner.calls
+	assert cut[:3] == [GIT, "worktree", "add"]
+	assert "-b" in cut and branch_for("bv-9sxj") in cut
+	assert str(req.cwd) in cut  # the worktree path git creates
+	assert cut[-1] == "main"  # the chosen base, last
+	assert cut_kwargs["cwd"] == str(tmp_path)  # git runs in the checkout
+	assert spawn[0] == CLAUDE
+	assert spawn_kwargs["cwd"] == str(req.cwd)  # claude runs in the worktree
+
+
+def test_a_w_dispatch_without_a_base_lets_git_default_to_head(tmp_path):
+	# No pick -- an empty branch list -- means no base arg, so `git worktree add`
+	# forks the checkout's current HEAD.
+	runner = FakeRunner()
+	dispatch(request_for(bean(), tmp_path, worktree=True), runner)
+	cut = runner.calls[0][0]
+	assert cut[-1] == str(worktree_path_for(tmp_path, "bv-9sxj"))  # path, no base after it
+
+
+def test_a_failed_worktree_cut_is_reported_and_claude_never_runs(tmp_path):
+	# A dirty base, a branch already taken, not a repo: the git error is the
+	# user's answer, and the agent that would have edited the wrong tree is
+	# never spawned.
+	runner = FakeRunner(returncode=1, stderr="fatal: 'worktree-bv-9sxj' already exists")
+	result = dispatch(request_for(bean(), tmp_path, worktree=True, base="main"), runner)
+	assert not result.ok
+	assert "already exists" in result.message
+	assert len(runner.calls) == 1  # git only, no claude behind it
+
+
+def test_a_w_dispatch_with_a_missing_root_spawns_nothing(tmp_path):
+	# The `W` guard is on the checkout, not the worktree: the worktree does not
+	# exist yet, and git is what makes it.
+	runner = FakeRunner()
+	result = dispatch(request_for(bean(), tmp_path / "gone", worktree=True, base="main"), runner)
+	assert not result.ok
+	assert "gone" in result.message
+	assert runner.calls == []
+
+
+def test_git_missing_from_path_is_a_sentence_not_a_traceback(tmp_path):
+	result = dispatch(
+		request_for(bean(), tmp_path, worktree=True, base="main"),
+		FakeRunner(raises=FileNotFoundError()),
+	)
+	assert not result.ok
+	assert "git" in result.message.lower()
+	assert "Traceback" not in result.message
+
+
+# -- listing the branches to pick from ------------------------------------
+
+
+def test_local_branches_is_one_name_per_line_read_from_the_repo():
+	runner = FakeRunner(stdout="main\nfeat/x\n\nfix/y\n")
+	assert local_branches(Path("/repos/bv"), runner) == ["main", "feat/x", "fix/y"]
+	# The repo, not the process cwd -- the same reason `beans` takes a path.
+	assert runner.kwargs["cwd"] == "/repos/bv"
+	assert "--format=%(refname:short)" in runner.command  # no `*`, no decoration
+
+
+def test_local_branches_is_empty_when_it_is_not_a_clean_listing():
+	# Best-effort: the caller falls through to a HEAD cut rather than blocking
+	# the dispatch on a picker it cannot fill.
+	assert local_branches(Path("/x"), FakeRunner(returncode=128, stderr="not a repo")) == []
+	assert local_branches(Path("/x"), FakeRunner(raises=FileNotFoundError())) == []
+
+
+def test_current_branch_is_none_on_a_detached_head_or_a_failure():
+	assert current_branch(Path("/x"), FakeRunner(stdout="main\n")) == "main"
+	assert current_branch(Path("/x"), FakeRunner(stdout="\n")) is None  # detached prints nothing
+	assert current_branch(Path("/x"), FakeRunner(returncode=1)) is None
 
 
 # -- the confirmation screen ----------------------------------------------
@@ -605,3 +742,64 @@ def test_the_dialog_no_longer_needs_to_scroll_for_a_huge_bean():
 		assert HINT in rendered(app)
 
 	show(scenario, request(body="x" * LARGEST_REAL_BODY))
+
+
+# -- the base picker ------------------------------------------------------
+
+
+def test_the_base_picker_hands_back_the_highlighted_branch():
+	# The picker's whole output is one branch: whatever the cursor is on when
+	# enter lands is the base the worktree forks from.
+	from textual.widgets import OptionList
+
+	async def main() -> None:
+		app = Host()
+		async with app.run_test(size=(80, 30)) as pilot:
+			screen = PickBase(["main", "feat/x", "fix/y"], current="feat/x")
+			app.push_screen(screen, app.remember)
+			await pilot.pause()
+			# The cursor starts on the checked-out branch, not the first row.
+			assert screen.query_one(OptionList).highlighted == 1
+			await pilot.press("enter")
+			await pilot.pause()
+			assert app.result == "feat/x"
+
+	asyncio.run(main())
+
+
+def test_the_base_picker_escapes_to_nothing():
+	# Escape out of the picker abandons the whole `W`: no base, no confirmation,
+	# no spawn.
+	async def main() -> None:
+		app = Host()
+		async with app.run_test(size=(80, 30)) as pilot:
+			screen = PickBase(["main"], current="main")
+			app.push_screen(screen, app.remember)
+			await pilot.pause()
+			await pilot.press("escape")
+			await pilot.pause()
+			assert app.result is None
+
+	asyncio.run(main())
+
+
+def test_the_base_picker_marks_the_current_branch_but_returns_the_raw_name():
+	# The mark is a label, not part of the value: `git worktree add` has to be
+	# handed `main`, never `main · current`.
+	from textual.widgets import OptionList
+
+	async def main() -> None:
+		app = Host()
+		async with app.run_test(size=(80, 30)) as pilot:
+			screen = PickBase(["main", "feat/x"], current="main")
+			app.push_screen(screen, app.remember)
+			await pilot.pause()
+			option_list = screen.query_one(OptionList)
+			assert "current" in str(option_list.get_option_at_index(0).prompt)
+			assert "current" not in str(option_list.get_option_at_index(1).prompt)
+			option_list.highlighted = 0
+			await pilot.press("enter")
+			await pilot.pause()
+			assert app.result == "main"
+
+	asyncio.run(main())

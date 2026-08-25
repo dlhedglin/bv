@@ -70,26 +70,40 @@ from textual.app import ComposeResult
 from textual.binding import Binding, BindingType
 from textual.containers import Vertical, VerticalScroll
 from textual.screen import ModalScreen
-from textual.widgets import Static
+from textual.widgets import OptionList, Static
+from textual.widgets.option_list import Option
 
 from .agents import session_name_for
 from .beans import Bean
 
 CLAUDE = "claude"
+GIT = "git"
 
 COMMAND_FLAGS = ("--bg", "--name")
 """`--bg, --background` and `-n, --name`, both confirmed present in
 `claude --help` on 2.1.233. The long spellings are used so the command reads
 the same in the confirmation dialog as it would typed by hand."""
 
-WORKTREE_FLAG = "--worktree"
-"""`-w, --worktree [name]`, confirmed present in `claude --help` on 2.1.234.
-Added to the command only when a dispatch asks for isolation (the `W` binding,
-not `S`); `claude` then creates `.claude/worktrees/<name>/` on branch
-`worktree-<name>`, branched fresh from origin/main, and starts the agent in it.
-The name bv passes is the bean id, so the branch and directory carry the same
-id the session name and the Agent column already match on. Long spelling for
-the same reason as `COMMAND_FLAGS`: the confirmation reads like a typed line."""
+ADD_DIR_FLAG = "--add-dir"
+"""`--add-dir <directories...>`, confirmed present in `claude --help` on 2.1.245.
+Added to a `W` command with the project's own `.beans` directory, so a worktree
+agent can reach the board even when `.beans` is git-ignored.
+
+`claude --worktree` was the earlier mechanism and is gone: it only ever branched
+from `worktree.baseRef` (fresh -> origin/main, or head), which is not a base a
+`W` dispatch can pick per spawn. bv now cuts the worktree itself with `git
+worktree add -b <branch> <path> <base>` -- see `dispatch` -- so the branch it
+forks from is the one the user chose in `PickBase`. The claude command that
+follows runs in that worktree with no `--worktree` of its own.
+
+Why `.beans` needs saying at all: Claude Code confines a session's tools to its
+working directory and below, and a worktree lives beside the main checkout, not
+under it. A tracked `.beans` is checked out into the worktree and needs nothing.
+A git-ignored one is not -- the agent's `beans update` resolves the real store
+by walking up to the main checkout, but writing there is outside the worktree
+and blocked without this. Pointed at `.beans` rather than the whole root so the
+grant is the board and not the main checkout's code -- isolation is the point of
+`W`."""
 
 DISPATCH_TIMEOUT = 30.0
 """Backstop, not a budget. The call itself is ~170 ms because `--bg` hands the
@@ -377,50 +391,132 @@ class DispatchRequest:
 	cwd: Path
 	prompt: str
 	worktree: str | None = None
-	"""The `--worktree` name when this dispatch is isolated, else None. Set to
+	"""The worktree/branch name when this dispatch is isolated, else None. Set to
 	the bean id by `request_for`, so it is None on an `S` dispatch and `bv-xxx`
-	on a `W` one. Kept as the name rather than a bare bool so `command` and
-	`summary_text` render the exact string `claude` will act on."""
+	on a `W` one. Kept as the name rather than a bare bool so `command`,
+	`dispatch` and `summary_text` render the exact strings the worktree is cut
+	and named with. On a `W` dispatch `cwd` is the worktree, not the checkout."""
+
+	base: str | None = None
+	"""The branch a `W` worktree is cut from, chosen in `PickBase`. None -- on an
+	`S` dispatch, or a `W` one the picker was skipped for -- lets `git worktree
+	add` default to the checkout's current HEAD."""
+
+	project_root: Path | None = None
+	"""The main checkout, on a `W` dispatch only. `cwd` is the worktree there, so
+	the root has to be carried separately: `git worktree add` runs in it, and its
+	`.beans` is what `--add-dir` grants the isolated agent."""
 
 	@property
 	def command(self) -> list[str]:
 		flags = [CLAUDE, "--bg"]
-		if self.worktree:
-			flags += [WORKTREE_FLAG, self.worktree]
+		if self.worktree and self.project_root is not None:
+			flags += [ADD_DIR_FLAG, str(self.project_root / ".beans")]
 		flags += ["--name", self.session_name]
 		return [*flags, self.prompt]
 
 
 def branch_for(worktree: str) -> str:
-	"""The branch `claude --worktree <name>` creates: `worktree-<name>`.
+	"""The branch a `W` dispatch cuts: `worktree-<name>`.
 
 	Named here, not hardcoded at the call sites, because the confirmation shows
-	it and the merge-back instructions in `prompt_for` name it -- the two must
-	agree, and this is the one place the convention lives."""
+	it, the merge-back instructions in `prompt_for` name it, `dispatch` cuts it
+	and `worktree_path_for` names the directory after it -- they must all agree,
+	and this is the one place the convention lives."""
 	return f"worktree-{worktree}"
 
 
-def request_for(bean: Bean, project_root: Path, *, worktree: bool = False) -> DispatchRequest:
+def worktree_path_for(project_root: Path, worktree: str) -> Path:
+	"""Where a `W` dispatch's worktree lands: `.claude/worktrees/<branch>`.
+
+	Under the checkout on purpose. `beans` finds a board by walking up from the
+	working directory, so a worktree nested here resolves the main checkout's
+	`.beans` for free -- the same directory `--add-dir` then grants write access
+	to. It is also the path `claude --worktree` used, so nothing downstream that
+	learned to look there has to change."""
+	return project_root / ".claude" / "worktrees" / branch_for(worktree)
+
+
+def local_branches(root: Path, runner: Runner = subprocess.run) -> list[str]:
+	"""The local branch names in `root`, for `PickBase` to offer as bases.
+
+	Read-only and best-effort: anything that is not a clean git listing -- no
+	git, not a repo, a nonzero exit -- comes back empty, and the caller falls
+	through to a HEAD-based cut rather than blocking the dispatch on a picker it
+	cannot fill. `%(refname:short)` so the names read the way `git worktree add`
+	takes them, one per line, no decoration and no current-branch asterisk.
+	"""
+	try:
+		proc = runner(
+			[GIT, "branch", "--format=%(refname:short)"],
+			cwd=str(root),
+			capture_output=True,
+			text=True,
+			timeout=DISPATCH_TIMEOUT,
+			check=False,
+		)
+	except (OSError, subprocess.SubprocessError):
+		return []
+	if proc.returncode != 0:
+		return []
+	return [line.strip() for line in proc.stdout.splitlines() if line.strip()]
+
+
+def current_branch(root: Path, runner: Runner = subprocess.run) -> str | None:
+	"""The branch `root` is on, so `PickBase` can start the cursor there.
+
+	None on a detached HEAD (the command prints nothing) or any failure -- the
+	picker just opens on its first row instead. Best-effort for the same reason
+	`local_branches` is."""
+	try:
+		proc = runner(
+			[GIT, "branch", "--show-current"],
+			cwd=str(root),
+			capture_output=True,
+			text=True,
+			timeout=DISPATCH_TIMEOUT,
+			check=False,
+		)
+	except (OSError, subprocess.SubprocessError):
+		return None
+	if proc.returncode != 0:
+		return None
+	return proc.stdout.strip() or None
+
+
+def request_for(bean: Bean, project_root: Path, *, worktree: bool = False, base: str | None = None) -> DispatchRequest:
 	"""Everything needed to spawn an agent for `bean`, decided up front.
 
 	`project_root` is passed in rather than derived: a `Bean` carries its
 	project's *name*, and only the app knows the board root it was discovered
 	under.
 
-	`worktree` is the `S`/`W` difference and nothing else routes it: `S` calls
-	with the default and the agent edits the project's checkout directly; `W`
-	passes True and the agent lands in an isolated worktree whose edits reach
-	the board only when its branch is merged. The prompt changes with it -- see
-	`prompt_for` -- because an agent that cannot touch the main checkout has to
-	commit its work for a merge to carry, where one editing the checkout does
-	not.
+	`worktree` is the `S`/`W` difference: `S` runs the agent in the checkout,
+	editing it directly; `W` runs it in an isolated worktree bv cuts from `base`,
+	whose code edits reach the board only when its branch is merged. `cwd` is the
+	checkout for `S` and the worktree for `W` -- the worktree does not exist yet,
+	`dispatch` creates it -- so a `W` request also carries `project_root`, which
+	`git worktree add` and `--add-dir` both need and `cwd` no longer is. `base`
+	is the branch to fork; None lets git default to the checkout's HEAD. The
+	prompt changes with `worktree` -- see `prompt_for` -- because an agent that
+	cannot touch the main checkout has to commit its work for a merge to carry.
 	"""
+	name = session_name_for(bean.id, bean.title)
+	if worktree:
+		return DispatchRequest(
+			bean_id=bean.id,
+			session_name=name,
+			cwd=worktree_path_for(project_root, bean.id),
+			prompt=prompt_for(bean, worktree=True),
+			worktree=bean.id,
+			base=base,
+			project_root=project_root,
+		)
 	return DispatchRequest(
 		bean_id=bean.id,
-		session_name=session_name_for(bean.id, bean.title),
+		session_name=name,
 		cwd=project_root,
-		prompt=prompt_for(bean, worktree=worktree),
-		worktree=bean.id if worktree else None,
+		prompt=prompt_for(bean),
 	)
 
 
@@ -447,10 +543,38 @@ def dispatch(request: DispatchRequest, runner: Runner = subprocess.run) -> Dispa
 	completely different answers from the user.
 
 	`runner` exists so tests never spawn anything. `claude --bg` starts a real
-	agent that spends tokens and can edit a real repo, so nothing in this
-	package's test suite is allowed near the default.
+	agent that spends tokens and can edit a real repo, and `git worktree add`
+	writes to a real repo, so nothing in this package's test suite is allowed
+	near the default.
+
+	A `W` dispatch is two subprocesses: bv cuts the worktree, then spawns claude
+	in it. If the cut fails -- a dirty base, a branch already taken, not a git
+	repo -- claude is never reached and the git error is reported in its own
+	words. If the cut lands but claude fails, the worktree is left on disk: a
+	human merges or removes it, the same hand the merge-back instructions assume,
+	and a retry would want the branch there anyway rather than silently gone.
 	"""
-	if not request.cwd.is_dir():
+	if request.worktree is not None:
+		root = request.project_root
+		if root is None or not root.is_dir():
+			shown = display_path(root) if root is not None else "the project root"
+			return DispatchResult(False, f"{shown} is not a directory")
+		add = [GIT, "worktree", "add", "-b", branch_for(request.worktree), str(request.cwd)]
+		if request.base:
+			add.append(request.base)
+		try:
+			cut = runner(add, cwd=str(root), capture_output=True, text=True, timeout=DISPATCH_TIMEOUT, check=False)
+		except FileNotFoundError:
+			return DispatchResult(False, f"`{GIT}` not found on PATH -- is git installed?")
+		except subprocess.TimeoutExpired:
+			return DispatchResult(False, f"`{GIT} worktree add` did not return within {DISPATCH_TIMEOUT:g}s")
+		except OSError as error:
+			return DispatchResult(False, f"could not start `{GIT}`: {error}")
+		if cut.returncode != 0:
+			detail = (cut.stderr or cut.stdout or "").strip().splitlines()
+			first = detail[0] if detail else f"exit {cut.returncode}"
+			return DispatchResult(False, f"{GIT} worktree: {first}")
+	elif not request.cwd.is_dir():
 		return DispatchResult(False, f"{display_path(request.cwd)} is not a directory")
 
 	try:
@@ -495,11 +619,13 @@ def summary_text(request: DispatchRequest) -> Text:
 		("cwd", display_path(request.cwd)),
 		("name", request.session_name),
 	]
-	# Only when isolated: on an `S` dispatch there is no branch, and a line
-	# saying so would be noise on the common path. When present it is the one
-	# fact that tells the two dispatch kinds apart in the dialog.
+	# Only when isolated: on an `S` dispatch there is no branch, and these lines
+	# would be noise on the common path. When present they are what tells the two
+	# dispatch kinds apart -- and `base` is the whole reason the picker exists, so
+	# the dialog names the branch the worktree forks from before it is cut.
 	if request.worktree:
 		rows.append(("branch", branch_for(request.worktree)))
+		rows.append(("base", request.base or "HEAD"))
 	text = Text()
 	for label, value in rows:
 		if text:
@@ -507,6 +633,106 @@ def summary_text(request: DispatchRequest) -> Text:
 		text.append(f"{label:<7}", style="dim")
 		text.append(value)
 	return text
+
+
+CURRENT_MARK = " · current"
+"""Appended to the checked-out branch in the picker. The board's own convention
+is a trailing tag, and `git`'s leading `*` would have to be stripped back off
+before the name reached `git worktree add`."""
+
+
+class PickBase(ModalScreen[str | None]):
+	"""Pick the branch a `W` worktree forks from.
+
+	Dismisses with the chosen branch, or None on escape, so the app's callback is
+	the one place a pick turns into a dispatch:
+
+	    self.push_screen(PickBase(branches, current), self._base_picked)
+
+	Never pushed empty. An empty branch list -- no git, a bare repo -- is the
+	app's cue to cut from HEAD without asking, so the picker always has rows and
+	its "nothing to pick" state does not have to be designed.
+
+	The whole point over `claude --worktree`: that only ever forked from
+	`worktree.baseRef`, a setting, not a per-spawn choice. Here the highlighted
+	branch is exactly the base `git worktree add` is handed.
+	"""
+
+	BINDINGS: ClassVar[list[BindingType]] = [
+		Binding("escape", "cancel", "Cancel"),
+	]
+
+	DEFAULT_CSS = """
+    PickBase {
+        align: center middle;
+
+        & > #base-dialog {
+            width: 60;
+            max-width: 90%;
+            height: auto;
+            max-height: 90%;
+            padding: 1 2;
+            background: $surface;
+            border: round $accent;
+        }
+
+        & #base-list {
+            height: auto;
+            max-height: 20;
+            margin: 1 0;
+            background: $panel;
+        }
+
+        & .base--title {
+            text-style: bold;
+        }
+
+        & .base--hint {
+            color: $text-muted;
+        }
+    }
+    """
+
+	TITLE_TEXT = "fork the worktree from which branch?"
+	HINT_TEXT = "[enter] pick   [esc] cancel"
+
+	def __init__(
+		self,
+		branches: list[str],
+		current: str | None = None,
+		*,
+		name: str | None = None,
+		id: str | None = None,
+		classes: str | None = None,
+	) -> None:
+		super().__init__(name=name, id=id, classes=classes)
+		self.branches = list(branches)
+		self.current = current
+
+	def compose(self) -> ComposeResult:
+		with Vertical(id="base-dialog"):
+			yield Static(Text(self.TITLE_TEXT), classes="base--title")
+			options = [
+				Option(branch + (CURRENT_MARK if branch == self.current else ""), id=branch) for branch in self.branches
+			]
+			yield OptionList(*options, id="base-list")
+			yield Static(Text(self.HINT_TEXT), classes="base--hint")
+
+	def on_mount(self) -> None:
+		# Start the cursor on the branch the checkout is already on: the likeliest
+		# base, and the one `claude --worktree`'s `head` default would have used.
+		option_list = self.query_one(OptionList)
+		if self.current in self.branches:
+			option_list.highlighted = self.branches.index(self.current)
+		option_list.focus()
+
+	def on_option_list_option_selected(self, event: OptionList.OptionSelected) -> None:
+		# Enter on the keyboard and a mouse click both arrive here -- the id is
+		# the raw branch name, never the ` · current` label the row may show.
+		self.dismiss(event.option.id)
+
+	def action_cancel(self) -> None:
+		self.dismiss(None)
 
 
 class ConfirmDispatch(ModalScreen[DispatchRequest | None]):
