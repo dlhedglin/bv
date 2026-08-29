@@ -55,6 +55,8 @@ from .dispatch import (
 	local_branches,
 	request_for,
 )
+from .edit import archive_argv, custom_frontmatter_keys, run_edit, update_argv
+from .editui import CLEAR, ChoiceScreen, PromptScreen
 from .mission import MissionControl
 from .preview import BeanPreview
 from .tree import (
@@ -76,6 +78,10 @@ PRIORITY_STYLES = {
 	"deferred": "dim",
 }
 
+FINISHED_STATUSES = frozenset({"completed", "scrapped"})
+"""The two statuses `beans archive` sweeps into `.beans/archive/`. Named here so
+the archive action can count what a sweep would move before running it."""
+
 TYPE_STYLES = {
 	"milestone": "bold magenta",
 	"epic": "magenta",
@@ -83,6 +89,10 @@ TYPE_STYLES = {
 	"bug": "red",
 	"task": "",
 }
+
+TYPE_ORDER = tuple(TYPE_STYLES)
+"""The bean types `beans update --type` accepts, in the order the type picker
+offers them. Derived from `TYPE_STYLES` so the two never drift."""
 
 EXPANDED, COLLAPSED, LEAF = "▾ ", "▸ ", "  "
 INDENT = "  "
@@ -225,6 +235,7 @@ class BeansViewer(App):
 		Binding("r", "reload", "Refresh"),
 		Binding("w", "toggle_watch", "Watch"),
 		Binding("a", "toggle_archived", "Archived"),
+		Binding("e", "edit", "Edit bean"),
 		Binding("S", "spawn", "Spawn agent"),
 		Binding("W", "spawn_worktree", "Worktree agent"),
 		Binding("m", "mission_control", "Mission control"),
@@ -733,6 +744,264 @@ class BeansViewer(App):
 		if result.ok and self._refresh_sessions():
 			self._render()
 			self._resummarize()
+
+	# -- edit ------------------------------------------------------------
+
+	def action_edit(self) -> None:
+		"""`e` -- change one property of the bean under the cursor.
+
+		Opens a menu of editable fields; each choice leads to a value picker or a
+		single-line prompt, and the pick becomes exactly one `beans update`. Works
+		in either view through `_current_bean`, like `S` and the yanks.
+
+		Every write goes through `_apply`, which runs the #208 guard first -- so
+		this is the one place bv mutates a bean, and it never does so silently over
+		a frontmatter key beans would drop. See src/bv/edit.py.
+		"""
+		self._pending_g = False
+		bean = self._current_bean()
+		if bean is None:
+			self.notify("no bean under the cursor", severity="information")
+			return
+		self._choose("edit which field?", self._edit_menu(bean), None, partial(self._edit_field, bean))
+
+	def _edit_menu(self, bean: Bean) -> list[tuple[str, str]]:
+		"""The editable-field rows, with the remove/clear rows shown only when they
+		would do something -- no "Remove tag" on a bean with no tags."""
+		items = [
+			("status", "Status"),
+			("priority", "Priority"),
+			("type", "Type"),
+			("title", "Title"),
+			("tag_add", "Add tag"),
+		]
+		if bean.tags:
+			items.append(("tag_remove", "Remove tag"))
+		items.append(("parent_set", "Set parent"))
+		if bean.parent_id:
+			items.append(("parent_remove", "Remove parent"))
+		items.append(("blocked_by_add", "Add blocker (blocked by)"))
+		if bean.blocked_by_ids:
+			items.append(("blocked_by_remove", "Remove blocker"))
+		items.append(("blocking_add", "Mark as blocking a bean"))
+		if bean.blocking_ids:
+			items.append(("blocking_remove", "Stop blocking a bean"))
+		items.append(("archive", "Archive finished beans (project-wide)"))
+		return items
+
+	def _edit_field(self, bean: Bean, field: str) -> None:
+		"""Route a chosen field to its value picker or prompt.
+
+		Every branch ends in `_apply(bean, label, flags)` -- the guarded write --
+		except the relational adds, which first check there is another bean to
+		point at, and archive, which is a project sweep of its own.
+		"""
+		if field == "status":
+			self._choose(
+				"new status",
+				[(status, status) for status in STATUS_ORDER],
+				bean.status,
+				lambda value: self._apply(bean, f"status → {value}", ("--status", value)),
+			)
+		elif field == "priority":
+			options = [(priority, priority) for priority in PRIORITY_ORDER] + [(CLEAR, "(clear priority)")]
+			self._choose(
+				"new priority",
+				options,
+				bean.priority,
+				lambda value: self._apply(
+					bean,
+					"priority cleared" if value == CLEAR else f"priority → {value}",
+					("--priority", "" if value == CLEAR else value),
+				),
+			)
+		elif field == "type":
+			self._choose(
+				"new type",
+				[(bean_type, bean_type) for bean_type in TYPE_ORDER],
+				bean.type,
+				lambda value: self._apply(bean, f"type → {value}", ("--type", value)),
+			)
+		elif field == "title":
+			self._prompt(
+				"new title",
+				bean.title,
+				lambda value: self._apply(bean, "title updated", ("--title", value)),
+			)
+		elif field == "tag_add":
+			self._prompt(
+				"tag to add",
+				"",
+				lambda value: self._apply(bean, f"tag +{value}", ("--tag", value)),
+			)
+		elif field == "tag_remove":
+			self._choose(
+				"remove which tag",
+				[(tag, tag) for tag in bean.tags],
+				None,
+				lambda value: self._apply(bean, f"tag -{value}", ("--remove-tag", value)),
+			)
+		elif field == "parent_set":
+			options = self._bean_options(bean, exclude={bean.id} | ({bean.parent_id} if bean.parent_id else set()))
+			if not options:
+				self.notify("no other bean in this project to set as parent", severity="information")
+				return
+			self._choose(
+				"set parent to",
+				options,
+				bean.parent_id,
+				lambda value: self._apply(bean, f"parent → {value}", ("--parent", value)),
+			)
+		elif field == "parent_remove":
+			self._apply(bean, "parent removed", ("--remove-parent",))
+		elif field == "blocked_by_add":
+			options = self._bean_options(bean, exclude={bean.id, *bean.blocked_by_ids})
+			if not options:
+				self.notify("no other bean in this project to add as a blocker", severity="information")
+				return
+			self._choose(
+				"blocked by which bean",
+				options,
+				None,
+				lambda value: self._apply(bean, f"blocked by {value}", ("--blocked-by", value)),
+			)
+		elif field == "blocked_by_remove":
+			self._choose(
+				"remove which blocker",
+				self._id_options(bean.blocked_by_ids),
+				None,
+				lambda value: self._apply(bean, f"unblocked from {value}", ("--remove-blocked-by", value)),
+			)
+		elif field == "blocking_add":
+			options = self._bean_options(bean, exclude={bean.id, *bean.blocking_ids})
+			if not options:
+				self.notify("no other bean in this project to block", severity="information")
+				return
+			self._choose(
+				"mark as blocking which bean",
+				options,
+				None,
+				lambda value: self._apply(bean, f"blocking {value}", ("--blocking", value)),
+			)
+		elif field == "blocking_remove":
+			self._choose(
+				"stop blocking which bean",
+				self._id_options(bean.blocking_ids),
+				None,
+				lambda value: self._apply(bean, f"stopped blocking {value}", ("--remove-blocking", value)),
+			)
+		elif field == "archive":
+			self._edit_archive(bean)
+
+	def _bean_options(self, bean: Bean, exclude: set[str]) -> list[tuple[str, str]]:
+		"""Live beans in the same project, minus `exclude`, as `(id, "id  title")`
+		rows for a parent/blocker picker. Same project because beans' relations do
+		not cross projects, and archived ones are dropped as dead targets."""
+		return [
+			(other.id, f"{other.id}  {other.title}")
+			for other in self._beans
+			if other.project == bean.project and other.id not in exclude and not other.is_archived
+		]
+
+	def _id_options(self, ids: tuple[str, ...]) -> list[tuple[str, str]]:
+		"""`(id, "id  title")` rows for a fixed set of ids -- the current parents,
+		blockers or blocked beans -- resolving each title from the loaded board and
+		falling back to the bare id for anything not currently loaded."""
+		titles = {other.id: other.title for other in self._beans}
+		return [(bean_id, f"{bean_id}  {titles[bean_id]}" if bean_id in titles else bean_id) for bean_id in ids]
+
+	def _choose(
+		self,
+		title: str,
+		options: list[tuple[str, str]],
+		current: str | None,
+		then: Callable[[str], None],
+	) -> None:
+		"""Push a `ChoiceScreen` and run `then` with the pick, dropping an escape.
+
+		The escape-is-None convention lives here rather than in every caller, so a
+		field handler only ever sees a real choice."""
+		self.push_screen(
+			ChoiceScreen(title, options, current=current),
+			lambda value: then(value) if value is not None else None,
+		)
+
+	def _prompt(self, title: str, initial: str, then: Callable[[str], None]) -> None:
+		"""Push a `PromptScreen` and run `then` with the entered text, dropping an
+		escape or an empty line -- neither is a value any edited field accepts."""
+		self.push_screen(
+			PromptScreen(title, initial=initial),
+			lambda value: then(value) if value is not None else None,
+		)
+
+	def _apply(self, bean: Bean, label: str, flags: tuple[str, ...]) -> None:
+		"""Guard, then run one `beans update`.
+
+		The #208 guard is the whole reason this is a method and not an inline
+		shell-out: before mutating, read the bean's file and refuse if `beans
+		update` would drop a frontmatter key it does not know, naming the key so
+		the loss is a decision rather than a surprise. bv's own beans carry no such
+		keys, so the common path falls straight through.
+		"""
+		beans_dir = self._project_root(bean.project) / ".beans"
+		lost = custom_frontmatter_keys(beans_dir / bean.path)
+		if lost:
+			self.notify(
+				f"edit refused -- `beans update` would drop custom frontmatter key {', '.join(lost)} (beans#208)",
+				severity="error",
+				timeout=10,
+			)
+			return
+		self.run_bean_edit(update_argv(beans_dir, bean.id, *flags), f"{bean.id}: {label}")
+
+	def _edit_archive(self, bean: Bean) -> None:
+		"""Confirm, then sweep the project's finished beans into the archive.
+
+		beans 0.4.2 has no per-bean archive: `beans archive` moves *every*
+		completed/scrapped bean in the project at once. So this counts them, names
+		the count in the confirmation, and is deliberately reached from the edit
+		menu of one bean while acting on the whole project.
+		"""
+		root = self._project_root(bean.project)
+		finished = [
+			other
+			for other in self._beans
+			if other.project == bean.project and other.status in FINISHED_STATUSES and not other.is_archived
+		]
+		if not finished:
+			self.notify("no completed or scrapped beans to archive in this project", severity="information")
+			return
+		count = len(finished)
+		plural = "s" if count != 1 else ""
+
+		def confirmed(value: str) -> None:
+			# A `def` rather than a lambda so the worker's return value is dropped:
+			# `run_bean_edit` is a `@work` method that returns a Worker, and a
+			# lambda would leak it where `_choose` wants None.
+			if value == "yes":
+				self.run_bean_edit(archive_argv(root / ".beans"), f"{bean.project}: archived {count} bean{plural}")
+
+		self._choose(
+			f"archive {count} finished bean{plural} in {bean.project}?",
+			[("yes", f"yes, archive {count} bean{plural}"), ("no", "no, cancel")],
+			None,
+			confirmed,
+		)
+
+	@work(exclusive=True, group="edit")
+	async def run_bean_edit(self, argv: tuple[str, ...], ok_message: str) -> None:
+		"""Run one `beans` write off the event loop, report it, and reload on success.
+
+		One process spawn and a small file rewrite -- the same order as a yank's
+		shell-out, but on the event loop it would still stall the keypress, so it
+		hops a thread like `run_dispatch`. On success the board reloads so the
+		change shows without waiting on the file watcher; on failure beans' own
+		first error line is what the toast carries.
+		"""
+		result = await asyncio.to_thread(run_edit, argv)
+		self.notify(ok_message if result.ok else result.message, severity="information" if result.ok else "error")
+		if result.ok:
+			self.load_beans()
 
 	# -- yank ------------------------------------------------------------
 

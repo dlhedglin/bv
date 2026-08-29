@@ -1,9 +1,12 @@
 """Read beans data by shelling out to the `beans` CLI's GraphQL API.
 
-Everything in this module is read-only. beans 0.4.2 ships two unpatched
+Everything in *this* module is read-only. beans 0.4.2 ships two unpatched
 write bugs -- hmans/beans#205 (`--if-match` CAS silently loses one of two
 concurrent writes) and #208 (`beans update` strips unknown frontmatter
-keys) -- so bv never mutates a bean. It only queries.
+keys) -- so the query layer never mutates a bean. The one place bv does write
+is `edit.py`, which shells out `beans update`/`beans archive` for interactive
+edits and guards #208 by refusing any bean that carries a key beans would drop;
+see that module. Nothing here is part of that path.
 
 Projects are addressed with `--beans-path` rather than by changing the
 working directory, because `beans` otherwise searches upward for a

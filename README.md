@@ -89,6 +89,7 @@ empty board that says so.
 | `r` | reload now |
 | `a` | show or hide archived beans |
 | `b` | switch between the tree and the kanban board |
+| `e` | edit this bean — status, priority, type, title, tags, parent, blockers, or archive the project's finished beans |
 | `S` | start a background Claude agent on this bean (asks first) |
 | `W` | start one in an isolated git worktree (asks first) |
 | `y` / `Y` | copy this bean's id / its id, title and status |
@@ -109,10 +110,34 @@ agent lands in an isolated git worktree on its own branch — its edits reach th
 main checkout only when that branch is merged. Either way the dialog asks first,
 because there is no undo beyond `claude stop`.
 
+The confirmation also carries an input for extra, one-off instructions. Anything
+typed there is appended to the end of the prompt for that spawn only — a nudge
+that belongs to this dispatch rather than to the bean, so it rides the prompt and
+is not written back. Leave it blank and the prompt is exactly the standing one.
+
 bv chooses the session `--name` and puts the bean id in it, which is what makes
 the Agent column an exact match for anything bv started rather than a guess from
 a working directory. It is a warning, never a lock: beans has no assignee field,
 so a second agent started elsewhere is noted but not prevented.
+
+### Editing a bean
+
+`e` opens a small menu on the bean under the cursor: change its **status**,
+**priority**, **type**, **title**, **tags**, **parent**, or its **blockers**
+(both the beans it is blocked by and the beans it blocks). Each choice runs one
+`beans update`. The menu and every value list take the same `j` / `k` / `g` /
+`G` motion as the board, so a pick never needs the arrow keys. The last menu
+entry archives the whole project's finished beans — `beans archive` has no
+per-bean form, so it sweeps every `completed` or `scrapped` bean into
+`.beans/archive/` at once, and asks first with the count.
+
+bv is otherwise read-only on purpose. The one guard that makes editing safe:
+before writing, bv checks the bean's frontmatter, and **refuses the edit if it
+carries a key beans does not recognise** — `beans update` on 0.4.2 rewrites the
+file and silently drops unknown keys ([beans#208]). Ordinary beans have no such
+keys and edit normally; the refusal only fires where a write would lose data.
+
+[beans#208]: https://github.com/hmans/beans/issues/208
 
 ## Maintainers
 
