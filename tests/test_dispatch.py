@@ -46,6 +46,8 @@ from bv.dispatch import (
 	prompt_for,
 	recorded_base,
 	request_for,
+	review_prompt_for,
+	review_request_for,
 	show_command,
 	update_command,
 	worktree_path_for,
@@ -455,6 +457,76 @@ def test_an_occupied_bean_gets_a_warning_and_an_empty_one_does_not():
 def test_a_path_under_home_is_shown_abbreviated():
 	assert display_path(Path.home() / "projects" / "bv") == "~/projects/bv"
 	assert display_path(Path("/opt/elsewhere")) == "/opt/elsewhere"
+
+
+# -- reviewing a worktree branch ------------------------------------------
+
+
+def test_the_review_prompt_runs_code_review_on_the_branch_against_the_base():
+	# bv-t5fb. A review is just another dispatch: `/code-review` on the branch,
+	# diffed against its recorded base. The branch name comes from `branch_for`,
+	# never a hardcoded `worktree-` prefix.
+	prompt = review_prompt_for(bean(), "main")
+	assert f"/code-review {branch_for('bv-9sxj')}" in prompt
+	assert branch_for("bv-9sxj") in prompt
+	# The base it diffs against is named, so a non-main base reads correctly too.
+	assert "against its base main" in prompt
+	assert "release-2" in review_prompt_for(bean(), "release-2")
+
+
+def test_the_review_prompt_tells_the_agent_to_append_findings_to_the_bean():
+	# The findings must reach the board's copy of the bean, so the agent appends
+	# them with `--body-append` (a real flag, confirmed against `beans update
+	# --help` on 0.4.2) rather than overwriting the body.
+	prompt = review_prompt_for(bean(), "main")
+	assert "beans update bv-9sxj --body-append" in prompt
+
+
+def test_the_review_prompt_forbids_merging_and_editing():
+	# Review reports; the human decides. It never enters the merge and never
+	# touches code -- both named in as many words.
+	prompt = review_prompt_for(bean(), "main")
+	assert "do NOT merge" in prompt or "Do NOT merge" in prompt
+	assert "do NOT edit" in prompt or "Do NOT edit" in prompt
+
+
+def test_the_review_prompt_still_points_the_agent_at_its_own_bean():
+	# Same read-it-first contract as `prompt_for`: the live record, not an inlined
+	# snapshot, and a stop rather than a guess when the read fails.
+	prompt = review_prompt_for(bean(), "main")
+	assert "beans show bv-9sxj --json" in prompt
+	assert "stop and say so" in prompt
+
+
+def test_the_review_title_drops_the_control_characters_that_would_truncate_argv():
+	# The title is the only free text reaching argv, same NUL hazard `prompt_for`
+	# sanitises: a NUL truncates the single prompt argument at the execve boundary.
+	prompt = review_prompt_for(bean(title="before\x00after\x1b[31m"), "main")
+	assert "\x00" not in prompt and "\x1b" not in prompt
+	assert "beforeafter" in prompt
+
+
+def test_a_review_request_is_an_s_style_job_in_the_checkout():
+	# The review runs in the main checkout, not the worktree: a `beans update`
+	# inside the worktree writes the branch's trapped `.beans` and reaches the
+	# board only at merge, but the review's job is to decide whether to merge.
+	spawned = review_request_for(bean(), Path("/repos/bv"), "main")
+	assert spawned.worktree is None
+	assert spawned.cwd == Path("/repos/bv")
+
+
+def test_a_review_request_runs_claude_and_carries_the_review_prompt():
+	# S-style through the unchanged `dispatch`: the command is the same claude
+	# invocation an ordinary `S` job runs, and its prompt is the review prompt.
+	spawned = review_request_for(bean(), Path("/repos/bv"), "main")
+	assert spawned.command == [
+		CLAUDE,
+		"--bg",
+		"--name",
+		spawned.session_name,
+		spawned.prompt,
+	]
+	assert spawned.prompt == review_prompt_for(bean(), "main")
 
 
 # -- running it -----------------------------------------------------------

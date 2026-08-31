@@ -1,14 +1,14 @@
 ---
 # bv-qlay
 title: /merge-worktrees skill
-status: todo
+status: draft
 type: task
 priority: normal
 tags:
     - agents
     - worktree
 created_at: 2026-08-25T18:47:52Z
-updated_at: 2026-08-25T18:47:52Z
+updated_at: 2026-08-31T15:36:35Z
 parent: bv-clrs
 blocked_by:
     - bv-swjd

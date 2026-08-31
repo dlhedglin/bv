@@ -1,13 +1,14 @@
 ---
 # bv-27nd
 title: Worktree state column on the board
-status: todo
+status: completed
 type: task
+priority: normal
 tags:
     - ui
     - worktree
 created_at: 2026-08-25T18:47:52Z
-updated_at: 2026-08-25T18:47:52Z
+updated_at: 2026-08-31T15:56:23Z
 parent: bv-clrs
 ---
 
@@ -56,3 +57,9 @@ Compute it once per poll from a single `git worktree list --porcelain` plus
 "merged" is transient — it vanishes once the branch is deleted at cleanup — and
 is partly redundant with the bean's own status flipping to completed on merge.
 "ready" is the load-bearing state; prioritise it if the four-way proves noisy.
+
+
+
+## Notes (shipped)
+
+Worktree state lives in `src/bv/worktree.py`: `worktree_states(root, bean_ids)` returns a bean-id -> state map (none/in-worktree/ready/merged), one `git branch` per project per poll plus a few reads only for beans that actually have a `worktree-<id>` branch -- cost is O(worktrees), not O(beans). `merged` uses the shared `merged_verdict` (ancestor fast path + `git cherry` patch-equivalence for squash/rebase merges), the same helper bv-gz14's delete guard uses. App wires it in as `self._worktrees`, refreshed on the 0.5s poll (`_refresh_worktrees`), rendered as a `WT` DataTable column and a kanban card badge (`board.worktree_cell` / `WORKTREE_STYLES`, ready = bold green).

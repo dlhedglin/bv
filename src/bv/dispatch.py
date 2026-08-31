@@ -616,6 +616,95 @@ def request_for(bean: Bean, project_root: Path, *, worktree: bool = False, base:
 	)
 
 
+def review_prompt_for(bean: Bean, base: str) -> str:
+	"""The prompt handed to a review agent: read the branch, report on the bean.
+
+	A review is just another dispatch -- bv's one trick -- so this reuses the
+	existing `/code-review` skill rather than a bespoke prompt, and rides the same
+	`dispatch` path an `S` job does. What is bespoke is where the findings go and
+	where the agent runs, and those two facts are the whole reason this prompt is
+	not `prompt_for`.
+
+	Runs from the main checkout, not the worktree, and this is not a convenience:
+	it is the same trap the module docstring names for a `W` status write. A
+	`beans update` run inside the worktree lands in the branch's isolated `.beans`
+	-- Claude Code confines the session below its working directory, and the board
+	the whole team reads is the main checkout's copy -- so findings written there
+	are trapped until the branch merges. But the point of a review is to decide
+	*whether* to merge; findings that only appear after the merge are findings
+	nobody could act on. So the agent runs in the checkout, where `beans update`
+	writes the one bean everyone reads, and reviews the branch across the git
+	boundary rather than by standing inside it.
+
+	`/code-review` on `branch_for(bean.id)`, diffed against `base` -- the branch's
+	recorded base, read from git config by `recorded_base`, defaulting to main.
+	The branch name goes through `branch_for` rather than a hardcoded
+	`worktree-` prefix, the same single source of truth `prompt_for`, `dispatch`
+	and `worktree_path_for` all agree on.
+
+	Findings land in the bean's Notes with `beans update <id> --body-append`, so
+	they append to the board's copy rather than replacing the body -- `--body-append`
+	is a real flag, confirmed against `beans update --help` on 0.4.2. This is a
+	report, not an action: the agent is told in as many words not to merge and not
+	to edit code. Review reports; the human decides. (Merging from a review would
+	also be the one thing worse than a bad review -- an unreviewed merge wearing a
+	review's name.)
+
+	Title sanitised via `_argv_safe` exactly as `prompt_for` does it: the title is
+	the only free text reaching the single prompt argument `claude` is handed, and
+	a NUL there truncates everything after it silently.
+	"""
+	branch = branch_for(bean.id)
+	header = f"Review bean {bean.id}"
+	title = _argv_safe(bean.title)
+	if title:
+		header = f"{header}: {title}"
+	return (
+		f"{header}\n"
+		f"\n"
+		f"Read it first:\n"
+		f"\n"
+		f"    {' '.join(show_command(bean.id))}\n"
+		f"\n"
+		f"Gives you body, status, priority, tags, blockers. If command\n"
+		f"fails, stop and say so -- do not infer the task from the title.\n"
+		f"\n"
+		f"Review the branch {branch}, diffing against its base {base}:\n"
+		f"\n"
+		f"    /code-review {branch}\n"
+		f"\n"
+		f"That is the branch's whole diff over {base} -- read the change, not\n"
+		f"just the files it names.\n"
+		f"\n"
+		f"Append your findings to the bean's Notes, so they land on the board's\n"
+		f"copy everyone reads:\n"
+		f"\n"
+		f"    beans update {bean.id} --body-append '<your findings>'\n"
+		f"\n"
+		f"Review only. Do NOT merge {branch}, and do NOT edit any code -- you\n"
+		f"report, the human decides. If the `beans update` fails, stop and say\n"
+		f"so; do not retry it into some other write."
+	)
+
+
+def review_request_for(bean: Bean, project_root: Path, base: str) -> DispatchRequest:
+	"""Everything needed to spawn a review agent for `bean`, decided up front.
+
+	Mirrors the non-worktree branch of `request_for`: `worktree=None`,
+	`cwd=project_root`, so this dispatches `S`-style through the unchanged
+	`dispatch`. That is deliberate -- the review must run in the main checkout,
+	never the worktree, so a `beans update` reaches the one bean the board reads
+	rather than the branch's trapped copy (see `review_prompt_for`). The prompt is
+	the only thing that differs from an ordinary `S` job.
+	"""
+	return DispatchRequest(
+		bean_id=bean.id,
+		session_name=session_name_for(bean.id, bean.title),
+		cwd=project_root,
+		prompt=review_prompt_for(bean, base),
+	)
+
+
 @dataclass(frozen=True)
 class DispatchResult:
 	"""How it went, phrased for `App.notify`."""

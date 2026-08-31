@@ -29,13 +29,14 @@ from rich.text import Text
 from textual import work
 from textual.app import App, ComposeResult
 from textual.binding import Binding, BindingType
-from textual.containers import Horizontal
-from textual.widgets import DataTable, Footer, Header, Input
+from textual.containers import Horizontal, Vertical
+from textual.screen import ModalScreen
+from textual.widgets import DataTable, Footer, Header, Input, Static
 
 from .agents import Attribution, Session, attribute_all, load_sessions, resolved
 from .agents import session_within as _session_within
 from .beans import PRIORITY_ORDER, STATUS_ORDER, STATUS_STYLES, Bean, is_project, load_all
-from .board import BeanBoard
+from .board import BeanBoard, worktree_cell
 from .clipboard import copy, yank_id, yank_line
 from .config import (
 	Settings,
@@ -49,11 +50,14 @@ from .dispatch import (
 	DispatchRequest,
 	PickBase,
 	already_working,
+	branch_for,
 	can_dispatch,
 	current_branch,
 	dispatch,
 	local_branches,
+	recorded_base,
 	request_for,
+	review_request_for,
 )
 from .edit import archive_argv, custom_frontmatter_keys, run_edit, update_argv
 from .editui import CLEAR, ChoiceScreen, PromptScreen
@@ -69,6 +73,14 @@ from .tree import (
 	visible_rows,
 )
 from .watch import Watcher
+from .worktree import NONE as WT_NONE
+from .worktree import READY as WT_READY
+from .worktree import (
+	merged_verdict,
+	remove_worktree,
+	worktree_dirty,
+	worktree_states,
+)
 
 PRIORITY_STYLES = {
 	"critical": "bold red",
@@ -176,6 +188,10 @@ META_WIDTHS = {
 	"status": _widest(STATUS_ORDER, "Status"),
 	"blocked": _widest((BLOCKED_YES, BLOCKED_NO), "Blocked"),
 	"agent": AGENT_WIDTH,
+	# The worktree lifecycle states, widest first; blank on the many beans with
+	# no worktree. Sized off the state words the column paints (see
+	# `worktree.py`), so a renamed state widens the column instead of clipping.
+	"worktree": _widest(("in-worktree", "ready", "merged"), "WT"),
 	# beans mints ids as `<project>-<4 random base32 chars>`; the project half
 	# is stripped because the heading above already names it.
 	"id": _widest(("xxxx",), "ID"),
@@ -199,6 +215,67 @@ the header."""
 POLL_INTERVAL = 0.5
 """How often to re-hash the bean files. The hash costs ~3ms against a ~21ms
 reload, so polling twice a second is cheap; see bv-scx8."""
+
+
+class ConfirmWorktreeDelete(ModalScreen[bool]):
+	"""Confirm removing a bean's worktree and branch. Dismisses True to remove.
+
+	Two faces on the same dialog. A merged, clean worktree loses nothing, so the
+	body just says so and enter removes it. When `needs_force` -- unmerged
+	commits, an uncommitted tree, or both, named in `reason` -- the body is a
+	stark red warning that removing discards that work, because the removal the
+	app then runs is `--force` / `git branch -D`. Escape (or any decline)
+	dismisses False and nothing is touched: like every other modal here, the
+	screen decides nothing itself, it only reports the choice back to the app.
+	"""
+
+	BINDINGS: ClassVar[list[BindingType]] = [
+		Binding("escape", "cancel", "Cancel"),
+		Binding("enter", "confirm", "Remove"),
+	]
+
+	DEFAULT_CSS = """
+	ConfirmWorktreeDelete {
+	    align: center middle;
+
+	    & > #delete-dialog {
+	        width: 60;
+	        max-width: 90%;
+	        height: auto;
+	        padding: 1 2;
+	        background: $surface;
+	        border: round $accent;
+	    }
+
+	    & .delete--title { text-style: bold; }
+	    & .delete--body { margin: 1 0; }
+	    & .delete--hint { color: $text-muted; }
+	}
+	"""
+
+	def __init__(self, worktree: str, *, needs_force: bool, reason: str) -> None:
+		super().__init__()
+		self.worktree = worktree
+		self.needs_force = needs_force
+		self.reason = reason
+
+	def compose(self) -> ComposeResult:
+		branch = branch_for(self.worktree)
+		with Vertical(id="delete-dialog"):
+			yield Static(Text(f"Remove worktree {branch}?"), classes="delete--title")
+			if self.needs_force:
+				body = Text(f"This would lose work -- {self.reason}. Removing discards it.", style="bold red")
+			else:
+				body = Text("Merged and clean: nothing is lost.", style="dim")
+			yield Static(body, classes="delete--body")
+			verb = "force remove" if self.needs_force else "remove"
+			yield Static(Text(f"[enter] {verb}   [esc] cancel"), classes="delete--hint")
+
+	def action_confirm(self) -> None:
+		self.dismiss(True)
+
+	def action_cancel(self) -> None:
+		self.dismiss(False)
 
 
 class BeanTable(DataTable):
@@ -238,6 +315,8 @@ class BeansViewer(App):
 		Binding("e", "edit", "Edit bean"),
 		Binding("S", "spawn", "Spawn agent"),
 		Binding("W", "spawn_worktree", "Worktree agent"),
+		Binding("R", "review_worktree", "Review worktree"),
+		Binding("D", "delete_worktree", "Delete worktree"),
 		Binding("m", "mission_control", "Mission control"),
 		Binding("y", "yank_id", "Yank id"),
 		# The second half of the pair, hidden for the same reason `G` is: the
@@ -280,6 +359,10 @@ class BeansViewer(App):
 		self._show_archived = False
 		self._sessions: list[Session] = []
 		self._working: dict[str, Attribution] = {}
+		# Worktree lifecycle state per bean id, recomputed each poll from git --
+		# NONE for the many beans with no `worktree-<id>` branch, so the column
+		# and the review/delete keys read a state without a git call per bean.
+		self._worktrees: dict[str, str] = {}
 		# Shorts of sessions under this board that are currently waiting on the
 		# user, so a fresh block raises one toast and a still-blocked session
 		# stays quiet. `None` until the first read, which seeds without firing
@@ -339,6 +422,7 @@ class BeansViewer(App):
 		table.add_column("Status", key="status", width=META_WIDTHS["status"])
 		table.add_column("Blocked", key="blocked", width=META_WIDTHS["blocked"])
 		table.add_column("Agent", key="agent", width=META_WIDTHS["agent"])
+		table.add_column("WT", key="worktree", width=META_WIDTHS["worktree"])
 		table.add_column("ID", key="id", width=META_WIDTHS["id"])
 		table.focus()
 		self.set_interval(POLL_INTERVAL, self._poll_for_changes)
@@ -390,8 +474,11 @@ class BeansViewer(App):
 			self._flat = flat
 			self.refresh_bindings()
 		# Attribution is keyed by bean id, so it has to be recomputed
-		# whenever the set of beans changes, not just when sessions do.
+		# whenever the set of beans changes, not just when sessions do. The
+		# worktree state is keyed the same way; the git reads ride a thread so a
+		# large multi-project board does not stall the load on the event loop.
 		self._refresh_sessions()
+		await asyncio.to_thread(self._refresh_worktrees)
 		self._rebuild_forest()
 		# Drop collapse state for nodes that no longer exist, but keep the
 		# rest -- a refresh should not blow away how you arranged the board.
@@ -467,7 +554,7 @@ class BeansViewer(App):
 		# Sessions move without any bean file changing -- an agent finishing is
 		# not a write to `.beans`. Cheap enough to check on every poll, and
 		# only repaints when the attribution actually moved.
-		if await asyncio.to_thread(self._refresh_sessions):
+		if await asyncio.to_thread(self._refresh_session_and_worktree_state):
 			self._render()
 			self._resummarize()
 
@@ -552,7 +639,9 @@ class BeansViewer(App):
 
 		# The board is fed from the same call, so a watch refresh, a filter
 		# and an archive toggle all reach both views without a second path.
-		self.query_one(BeanBoard).set_beans(self._board_beans(), show_project=not self._flat)
+		self.query_one(BeanBoard).set_beans(
+			self._board_beans(), show_project=not self._flat, worktree_states=self._worktrees
+		)
 
 		self._restore_cursor(previous)
 		self._sync_preview()
@@ -571,7 +660,7 @@ class BeansViewer(App):
 		board.set_class(not self._board, "hidden")
 		table.set_class(self._board, "hidden")
 		if self._board:
-			board.set_beans(self._board_beans(), show_project=not self._flat)
+			board.set_beans(self._board_beans(), show_project=not self._flat, worktree_states=self._worktrees)
 			if (preview := self._preview()) is not None:
 				preview.show(board.selected)
 		else:
@@ -739,11 +828,120 @@ class BeansViewer(App):
 		# the exact moment the user is watching it is not acceptable.
 		result = await asyncio.to_thread(dispatch, request)
 		self.notify(result.message, severity="information" if result.ok else "error")
-		# The new session should appear in the Agent column immediately
-		# rather than up to half a second later.
-		if result.ok and self._refresh_sessions():
-			self._render()
-			self._resummarize()
+		# The new session should appear in the Agent column immediately rather
+		# than up to half a second later. A `W` dispatch also just cut a
+		# `worktree-<id>` branch, so refresh the worktree state in the same beat
+		# -- the column should show the new worktree without waiting for a poll.
+		if result.ok:
+			moved = await asyncio.to_thread(self._refresh_session_and_worktree_state)
+			if moved:
+				self._render()
+				self._resummarize()
+
+	# -- worktree review and cleanup -------------------------------------
+
+	def action_review_worktree(self) -> None:
+		"""`R` -- dispatch a code-review of the bean's ready worktree branch.
+
+		An S-style job: the review agent runs in the *main checkout*, never inside
+		the worktree, so its `beans update --body-append` findings land on the
+		board's copy of the bean rather than the branch's trapped `.beans` (the
+		same trap the `W` status write hits). The diff is `worktree-<id>` against
+		its recorded base. It reviews and reports; it does not merge and does not
+		edit code -- see `dispatch.review_prompt_for`.
+
+		Offered only when the worktree is `ready` (finished, unmerged): there is
+		nothing to review before the agent has committed, and a merged branch is
+		already past this step. Any other state is a no-op with a notify, matching
+		`S`/`W` when there is no bean under the cursor. The base is read
+		synchronously, as `W` reads its branch list -- one fast `git config`.
+		"""
+		self._pending_g = False
+		bean = self._current_bean()
+		if bean is None:
+			self.notify("no bean under the cursor", severity="information")
+			return
+		if self._worktrees.get(bean.id, WT_NONE) != WT_READY:
+			self.notify(f"no ready worktree to review for {bean.id}", severity="information")
+			return
+		root = self._project_root(bean.project)
+		base = recorded_base(root, bean.id)
+		self.push_screen(
+			ConfirmDispatch(
+				review_request_for(bean, root, base),
+				warning=already_working(self._agent_on(bean)),
+			),
+			self._dispatch_confirmed,
+		)
+
+	def action_delete_worktree(self) -> None:
+		"""`D` -- remove the bean's worktree and delete its branch, guarded.
+
+		Symmetric with the `git worktree add` bv runs on `W`: worktree
+		housekeeping, not a code merge, so it stays inside the observe-only line
+		(which is specifically "bv never runs `git merge`"). Guarded against losing
+		work -- a merged, clean worktree removes freely; one with unmerged commits
+		or an uncommitted tree is refused by default and only removed after an
+		explicit force confirm. `merged` catches squash/rebase-merged PRs, not just
+		fast-forwards -- see `worktree.merged_verdict`.
+
+		No worktree for the bean is a no-op with a notify, never an error. The
+		merged/dirty reads are synchronous, as `W`'s branch reads are; the actual
+		removal rides a thread because a `git worktree remove` can take a moment.
+		"""
+		self._pending_g = False
+		bean = self._current_bean()
+		if bean is None:
+			self.notify("no bean under the cursor", severity="information")
+			return
+		if self._worktrees.get(bean.id, WT_NONE) == WT_NONE:
+			self.notify(f"no worktree for {bean.id}", severity="information")
+			return
+		root = self._project_root(bean.project)
+		needs_force, reason = self._worktree_delete_plan(root, bean.id)
+		self.push_screen(
+			ConfirmWorktreeDelete(bean.id, needs_force=needs_force, reason=reason),
+			partial(self._delete_confirmed, bean, root, needs_force),
+		)
+
+	def _worktree_delete_plan(self, root: Path, bean_id: str) -> tuple[bool, str]:
+		"""Whether removing this worktree would lose work, and why.
+
+		`(needs_force, reason)`. A merged branch with a clean tree loses nothing
+		and removes without a force. Unmerged commits or an uncommitted tree each
+		mean a plain `git worktree remove` / `git branch -d` would refuse or
+		discard work, so a force confirm is required; the reason names which, so
+		the dialog can say what is at stake rather than a bare "are you sure".
+		"""
+		merged = merged_verdict(root, bean_id)
+		dirty = worktree_dirty(root, bean_id)
+		if merged and not dirty:
+			return (False, "merged")
+		reasons = []
+		if not merged:
+			reasons.append("unmerged commits")
+		if dirty:
+			reasons.append("uncommitted changes")
+		return (True, " and ".join(reasons))
+
+	def _delete_confirmed(self, bean: Bean, root: Path, force: bool, proceed: bool | None) -> None:
+		# None/False is escape or decline; only an explicit confirm removes.
+		if proceed:
+			self.remove_worktree_job(bean, root, force)
+
+	@work(exclusive=True, group="dispatch")
+	async def remove_worktree_job(self, bean: Bean, root: Path, force: bool) -> None:
+		# `git worktree remove` shells out; keep it off the event loop like the
+		# dispatch and load do.
+		ok, message = await asyncio.to_thread(remove_worktree, root, bean.id, force=force)
+		self.notify(message, severity="information" if ok else "error")
+		# The removed worktree should leave the column immediately rather than at
+		# the next poll; the branch is gone, so its state flips to `none`.
+		if ok:
+			moved = await asyncio.to_thread(self._refresh_session_and_worktree_state)
+			if moved:
+				self._render()
+				self._resummarize()
 
 	# -- edit ------------------------------------------------------------
 
@@ -1175,6 +1373,7 @@ class BeansViewer(App):
 			Text(bean.status, style=STATUS_STYLES.get(bean.status, "")),
 			self._blocked_text(bean),
 			self._agent_text(bean),
+			worktree_cell(self._worktrees.get(bean.id, WT_NONE)),
 			Text(bean.id.removeprefix(f"{bean.project}-"), style="dim"),
 		)
 
@@ -1243,6 +1442,37 @@ class BeansViewer(App):
 		)
 		self._announce_needs_input()
 		return self._session_render_state() != previous
+
+	def _refresh_session_and_worktree_state(self) -> bool:
+		"""Re-read both session attribution and worktree state in one thread hop.
+
+		Runs off the poll's `to_thread`. Both are checked -- never short-circuited
+		-- so a repaint fires when *either* the Agent column or the Worktree
+		column moved, and neither read is skipped because the other already
+		reported a change.
+		"""
+		sessions_moved = self._refresh_sessions()
+		worktrees_moved = self._refresh_worktrees()
+		return sessions_moved or worktrees_moved
+
+	def _refresh_worktrees(self) -> bool:
+		"""Recompute every bean's worktree lifecycle state. Returns whether it moved.
+
+		Grouped by project root -- worktree branches live in each project's own
+		repo -- so it is one `git branch` per project per poll, plus a few reads
+		only for the projects that actually have live worktrees. Cheap enough to
+		ride the existing 0.5 s poll (see `worktree.worktree_states`), and the
+		common all-`none` board never pays more than the `git branch`.
+		"""
+		previous = self._worktrees
+		by_root: dict[Path, list[str]] = {}
+		for bean in self._beans:
+			by_root.setdefault(self._project_root(bean.project), []).append(bean.id)
+		states: dict[str, str] = {}
+		for root, ids in by_root.items():
+			states.update(worktree_states(root, ids))
+		self._worktrees = states
+		return states != previous
 
 	def _announce_needs_input(self) -> None:
 		"""Toast once when a session under this board starts waiting on the user.

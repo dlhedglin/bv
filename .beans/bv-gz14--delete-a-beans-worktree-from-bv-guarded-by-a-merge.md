@@ -1,14 +1,14 @@
 ---
 # bv-gz14
 title: Delete a bean's worktree from bv, guarded by a merged check
-status: todo
+status: completed
 type: task
 priority: normal
 tags:
     - worktree
     - ui
 created_at: 2026-08-29T18:54:23Z
-updated_at: 2026-08-29T18:54:31Z
+updated_at: 2026-08-31T15:56:23Z
 parent: bv-clrs
 blocked_by:
     - bv-swjd
@@ -93,3 +93,9 @@ on bv-swjd for the base record; composes with bv-qlay (skill cleans up what it
 merges; this key handles abandon and PR-merged-elsewhere) and bv-27nd (shares
 the merged verdict). Proposed key `D` — free in `App.BINDINGS`; confirm at
 implementation it does not collide.
+
+
+
+## Notes (shipped)
+
+`D` key -> `action_delete_worktree`, guarded. `_worktree_delete_plan` combines `worktree.merged_verdict` (squash/rebase-aware) and `worktree.worktree_dirty`: merged+clean removes without force; unmerged commits or a dirty tree require a force confirm (`ConfirmWorktreeDelete`, stark red face) that runs `git worktree remove --force` + `git branch -D`. No worktree = no-op notify. Removal via `worktree.remove_worktree` (tree then branch). bv-27nd's column reuses the same `merged_verdict`. Keys `R`/`D` confirmed free in `App.BINDINGS`.

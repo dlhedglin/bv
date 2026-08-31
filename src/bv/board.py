@@ -68,6 +68,7 @@ from textual.message import Message
 from textual.widgets import Static
 
 from .beans import STATUS_STYLES, Bean, rank
+from .worktree import IN_WORKTREE, MERGED, NONE, READY
 
 COLUMNS = ("in-progress", "todo", "draft", "completed")
 """The columns, in the order a human reads a backlog -- the same order as
@@ -125,6 +126,45 @@ NOTHING, applied to a whole column."""
 
 BLOCKED_MARKER = "⊘"
 CRITICAL_MARKER = "!"
+
+WORKTREE_STYLES = {
+	# One place the worktree lifecycle is painted, the way STATUS_STYLES owns the
+	# status palette -- reusing its colour names rather than minting a new scheme,
+	# so a bean's worktree badge reads against the same vocabulary as its column.
+	# NONE is here for completeness but never painted: `worktree_cell` renders it
+	# blank (see there), so its style is unused.
+	NONE: "dim",
+	# The agent is still working; nothing to merge yet -- the un-bold `yellow` of
+	# in-progress work, dimmer than the load-bearing READY beside it.
+	IN_WORKTREE: "yellow",
+	# The one state the column exists to surface: work done, waiting on a human.
+	# `bold green`, the strongest thing on the palette -- the same weight app.py's
+	# `_agent_text` gives a live agent and the green STATUS_STYLES gives completed.
+	READY: "bold green",
+	# Already merged, transient, about to be cleaned up: muted like a `draft`, so
+	# it is legible without competing with the READY badges that still need action.
+	MERGED: "dim",
+}
+"""State -> style for a worktree badge. Mirrors `STATUS_STYLES`: the mapping
+lives here so the card badge and any future column read paint identically."""
+
+
+def worktree_cell(state: str) -> Text:
+	"""A worktree lifecycle state as a colour-coded badge, blank for NONE.
+
+	`NONE` is an empty `Text` on purpose, the way `app.py`'s `_agent_text` returns
+	blank for a bean with no agent: most beans have no worktree, and a column of
+	the word "none" would be the loudest empty thing on the board. The point of
+	the badge is to make the handful that *do* have one -- READY especially --
+	stand out, which a blank for the common case is what buys.
+
+	The visible states render their own name (`ready`, `in-worktree`, `merged`)
+	styled from `WORKTREE_STYLES`, spelled out rather than glyphed for the same
+	reason `marker_text`'s off-status badge is: they are rare enough that a word
+	costs nothing and an unguessable symbol for "ready to merge" is worse than none.
+	"""
+	label = "" if state == NONE else state
+	return Text(label, style=WORKTREE_STYLES.get(state, ""))
 
 
 def column_of(status: str) -> str:
@@ -202,7 +242,7 @@ def wrap_title(title: str, width: int) -> list[str]:
 	return [*lines, *[""] * TITLE_LINES][:TITLE_LINES]
 
 
-def marker_text(bean: Bean) -> Text:
+def marker_text(bean: Bean, *, worktree_state: str | None = None) -> Text:
 	"""The badges that lead a card's meta line.
 
 	Leading, not trailing, for the reason app.py gives about tags: the half a
@@ -216,6 +256,12 @@ def marker_text(bean: Bean) -> Text:
 	rare enough (1 scrapped bean) that a word costs nothing, and an
 	unguessable symbol for "this column is not what it says" is worse than
 	none.
+
+	`worktree_state` adds a worktree badge (a READY branch above all) when it is
+	a non-blank state. Optional and defaulting to None so every existing caller
+	renders exactly as before: the app threads the per-poll state dict in, but a
+	bean with no worktree -- the common case -- passes NONE or None and gets no
+	badge, the same blank `worktree_cell` produces.
 	"""
 	text = Text()
 	if bean.priority == "critical":
@@ -224,10 +270,13 @@ def marker_text(bean: Bean) -> Text:
 		text.append(f"{BLOCKED_MARKER} ", style="red")
 	if bean.status != column_of(bean.status):
 		text.append(f"{bean.status} ", style="dim italic")
+	if worktree_state is not None and worktree_state != NONE:
+		text.append_text(worktree_cell(worktree_state))
+		text.append(" ")
 	return text
 
 
-def meta_text(bean: Bean, width: int, *, show_project: bool = True) -> Text:
+def meta_text(bean: Bean, width: int, *, show_project: bool = True, worktree_state: str | None = None) -> Text:
 	"""Badges, then the project and the id suffix, truncated to `width`.
 
 	The project is on the card because the board is flat: it is the only place
@@ -238,20 +287,23 @@ def meta_text(bean: Bean, width: int, *, show_project: bool = True) -> Text:
 	`show_project` is False on a single-project board -- bv run from inside one
 	repo -- where the project half is the same string on every card and so
 	spends the card's narrowest resource on nothing.
+
+	`worktree_state` rides through to `marker_text`; None (the default) is no
+	badge, so existing callers are unaffected.
 	"""
-	text = marker_text(bean)
+	text = marker_text(bean, worktree_state=worktree_state)
 	suffix = bean.id.removeprefix(f"{bean.project}-")
 	label = Text(f"{bean.project} · {suffix}" if show_project else suffix, style="dim")
 	label.truncate(max(0, width - text.cell_len), overflow="ellipsis")
 	return text + label
 
 
-def card_text(bean: Bean, width: int, *, show_project: bool = True) -> Text:
+def card_text(bean: Bean, width: int, *, show_project: bool = True, worktree_state: str | None = None) -> Text:
 	"""The whole card: TITLE_LINES title lines, then one meta line."""
 	text = Text()
 	for line in wrap_title(bean.title, width):
 		text.append(f"{line}\n")
-	return text + meta_text(bean, max(MIN_CARD_WIDTH, width), show_project=show_project)
+	return text + meta_text(bean, max(MIN_CARD_WIDTH, width), show_project=show_project, worktree_state=worktree_state)
 
 
 class BeanCard(Static):
@@ -263,20 +315,34 @@ class BeanCard(Static):
 	would be ~650 to mount on the first paint.
 	"""
 
-	def __init__(self, bean: Bean, width: int, show_project: bool = True) -> None:
-		super().__init__(card_text(bean, width, show_project=show_project), classes="board--card")
+	def __init__(self, bean: Bean, width: int, show_project: bool = True, worktree_state: str | None = None) -> None:
+		super().__init__(
+			card_text(bean, width, show_project=show_project, worktree_state=worktree_state),
+			classes="board--card",
+		)
 		self.bean = bean
 		self._width = width
 		self._show_project = show_project
+		self._worktree_state = worktree_state
 
-	def set_bean(self, bean: Bean, width: int, show_project: bool = True) -> None:
-		"""Repoint this card at `bean`, re-rendering only if something moved."""
-		if bean == self.bean and width == self._width and show_project == self._show_project:
+	def set_bean(self, bean: Bean, width: int, show_project: bool = True, worktree_state: str | None = None) -> None:
+		"""Repoint this card at `bean`, re-rendering only if something moved.
+
+		`worktree_state` is part of the moved-or-not check: a branch reaching
+		READY under a poll is a repaint even though the bean itself is unchanged.
+		"""
+		if (
+			bean == self.bean
+			and width == self._width
+			and show_project == self._show_project
+			and worktree_state == self._worktree_state
+		):
 			return
 		self.bean = bean
 		self._width = width
 		self._show_project = show_project
-		self.update(card_text(bean, width, show_project=show_project))
+		self._worktree_state = worktree_state
+		self.update(card_text(bean, width, show_project=show_project, worktree_state=worktree_state))
 
 
 class BoardColumn(Vertical):
@@ -308,7 +374,13 @@ class BoardColumn(Vertical):
 	def cards(self) -> list[BeanCard]:
 		return [child for child in self._cards.children if isinstance(child, BeanCard)]
 
-	def show(self, column: Column, width: int, show_project: bool = True) -> None:
+	def show(
+		self,
+		column: Column,
+		width: int,
+		show_project: bool = True,
+		worktree_states: dict[str, str] | None = None,
+	) -> None:
 		"""Display `column`, reusing the card widgets already mounted.
 
 		Reuse rather than clear-and-remount is the whole trick, and it is here
@@ -325,19 +397,29 @@ class BoardColumn(Vertical):
 
 		existing = self.cards
 		for card, bean in zip(existing, column.beans, strict=False):
-			card.set_bean(bean, width, show_project)
+			card.set_bean(bean, width, show_project, _state(worktree_states, bean))
 		if len(column.beans) > len(existing):
-			self._cards.mount_all([BeanCard(bean, width, show_project) for bean in column.beans[len(existing) :]])
+			self._cards.mount_all(
+				[
+					BeanCard(bean, width, show_project, _state(worktree_states, bean))
+					for bean in column.beans[len(existing) :]
+				]
+			)
 		else:
 			# Removal is scheduled, not immediate, but only ever from the tail,
 			# so the cards that remain keep their positions and the offset holds.
 			for card in existing[len(column.beans) :]:
 				card.remove()
 
-	def refit(self, width: int, show_project: bool = True) -> None:
-		"""Re-wrap every card for a new width, without remounting any of them."""
+	def refit(self, width: int, show_project: bool = True, worktree_states: dict[str, str] | None = None) -> None:
+		"""Re-wrap every card for a new width, without remounting any of them.
+
+		Carries the worktree states through for the same reason `show` does: a
+		resize re-renders every card, so a card that dropped its badge on resize
+		would lose it until the next poll.
+		"""
 		for card in self.cards:
-			card.set_bean(card.bean, width, show_project)
+			card.set_bean(card.bean, width, show_project, _state(worktree_states, card.bean))
 
 
 class BeanBoard(Horizontal):
@@ -446,6 +528,7 @@ class BeanBoard(Horizontal):
 		self._touched = False
 		self._width = MIN_CARD_WIDTH
 		self._show_project = True
+		self._worktree_states: dict[str, str] | None = None
 
 	def compose(self) -> ComposeResult:
 		yield from self._columns
@@ -455,7 +538,13 @@ class BeanBoard(Horizontal):
 
 	# -- interface for the app -------------------------------------------
 
-	def set_beans(self, beans: Sequence[Bean], *, show_project: bool = True) -> None:
+	def set_beans(
+		self,
+		beans: Sequence[Bean],
+		*,
+		show_project: bool = True,
+		worktree_states: dict[str, str] | None = None,
+	) -> None:
 		"""Replace what the board shows.
 
 		Safe before mount -- the content is applied on mount -- and cheap to
@@ -467,15 +556,28 @@ class BeanBoard(Horizontal):
 		`show_project` is part of that check because it changes what every card
 		renders -- a board that becomes single-project mid-session (a `beans
 		init` in the root) has to repaint even though no bean moved.
+
+		`worktree_states` maps bean id -> lifecycle state (`worktree.py`), the
+		app's per-poll answer for the worktree badge. Also part of the check: a
+		branch reaching READY repaints its card even though no bean moved. None
+		(the default) is the pre-worktree behaviour -- no badges, existing callers
+		and tests unaffected -- and is kept distinct from an empty dict, which is
+		"computed, nothing has a worktree".
 		"""
 		data = build_columns(beans)
-		if self._applied and data == self._data and show_project == self._show_project:
+		if (
+			self._applied
+			and data == self._data
+			and show_project == self._show_project
+			and worktree_states == self._worktree_states
+		):
 			return
 		# Read before `_data` is replaced -- the cursor is restored by bean id,
 		# and after the swap there is nothing left to say what it was on.
 		previous = self.selected if self._applied else None
 		self._data = data
 		self._show_project = show_project
+		self._worktree_states = worktree_states
 		if self.is_mounted:
 			self._apply(previous)
 
@@ -539,7 +641,7 @@ class BeanBoard(Horizontal):
 			return
 		self._width = width
 		for column in self._columns:
-			column.refit(width, self._show_project)
+			column.refit(width, self._show_project, self._worktree_states)
 
 	def _card_width(self) -> int:
 		width = self.size.width // len(COLUMNS) - CARD_OVERHEAD
@@ -549,7 +651,7 @@ class BeanBoard(Horizontal):
 		self._applied = True
 		self._width = self._card_width()
 		for column, data in zip(self._columns, self._data, strict=True):
-			column.show(data, self._width, self._show_project)
+			column.show(data, self._width, self._show_project, self._worktree_states)
 		self._restore_cursor(previous)
 		self._refresh_selection()
 
@@ -614,3 +716,15 @@ class BeanBoard(Horizontal):
 def _clamp(value: int, length: int) -> int:
 	"""Into `[0, length - 1]`, or 0 for an empty column."""
 	return max(0, min(value, length - 1))
+
+
+def _state(worktree_states: dict[str, str] | None, bean: Bean) -> str | None:
+	"""A bean's worktree state out of the per-poll dict, or None when there is no
+	dict at all -- the pre-worktree default that renders a card exactly as before.
+
+	A bean absent from a present dict is `NONE`, not None: the dict is the whole
+	board's answer, so a missing key means "computed, no worktree", which the
+	badge treats the same as None (blank) but keeps distinct from "no dict yet"."""
+	if worktree_states is None:
+		return None
+	return worktree_states.get(bean.id, NONE)

@@ -20,6 +20,7 @@ from bv.board import (
 	MIN_CARD_WIDTH,
 	TITLE_LINES,
 	UNTITLED,
+	WORKTREE_STYLES,
 	BeanBoard,
 	BeanCard,
 	BoardColumn,
@@ -27,9 +28,12 @@ from bv.board import (
 	card_text,
 	column_of,
 	heading_text,
+	marker_text,
 	meta_text,
+	worktree_cell,
 	wrap_title,
 )
+from bv.worktree import IN_WORKTREE, MERGED, NONE, READY
 
 T0 = datetime(2026, 1, 1, tzinfo=UTC)
 
@@ -250,6 +254,65 @@ def test_a_single_project_card_keeps_its_badges():
 def test_card_text_passes_the_choice_through():
 	assert "demo-a" not in card_text(bean(project="demo-a"), 40, show_project=False).plain
 	assert "demo-a" in card_text(bean(project="demo-a"), 40).plain
+
+
+# -- worktree badge --------------------------------------------------------
+#
+# A `worktree-<id>` branch's lifecycle state, drawn on the card so the handful
+# of beans that have one -- READY above all -- stand out on a board where most
+# have none. Backward-compat is load-bearing: the app wires the state dict in
+# later, and until then every caller passes nothing and must render as before.
+
+
+def test_a_bean_with_no_worktree_gets_a_blank_cell():
+	# Blank, not the word "none": most beans are here, and a column of "none"
+	# would be the loudest empty thing on the board -- app.py's _agent_text rule.
+	assert worktree_cell(NONE).plain == ""
+
+
+def test_ready_is_the_most_prominent_worktree_badge():
+	# READY is the one state the column exists to surface; it gets the strongest
+	# weight on the palette, the same bold green completed and a live agent read.
+	cell = worktree_cell(READY)
+	assert cell.plain
+	assert cell.style == "bold green"
+	assert cell.style == WORKTREE_STYLES[READY]
+
+
+def test_each_worktree_state_maps_to_its_style_entry():
+	# The mapping lives in WORKTREE_STYLES alone, the way STATUS_STYLES owns the
+	# status palette -- worktree_cell must read it rather than keep a second copy.
+	for state in (IN_WORKTREE, READY, MERGED):
+		assert worktree_cell(state).plain == state
+		assert worktree_cell(state).style == WORKTREE_STYLES[state]
+
+
+def test_a_ready_worktree_badges_the_card_and_a_bare_one_does_not():
+	# The same card rendered both ways: the badge is present only when a READY
+	# state rides in, so the board can call out a branch waiting to be merged.
+	assert "ready" in meta_text(bean(), 40, worktree_state=READY).plain
+	assert "ready" not in meta_text(bean(), 40).plain
+	assert "ready" not in meta_text(bean(), 40, worktree_state=NONE).plain
+
+
+def test_marker_text_adds_a_worktree_badge_only_for_a_non_blank_state():
+	assert "ready" in marker_text(bean(), worktree_state=READY).plain
+	assert marker_text(bean(), worktree_state=NONE).plain == marker_text(bean()).plain == ""
+
+
+def test_the_worktree_badge_leads_the_meta_line_beside_the_other_markers():
+	# Leading, so it survives truncation the way the blocked badge does -- a
+	# READY branch a reader cannot see is a merge that never happens.
+	plain = meta_text(bean(blocked=1), 40, worktree_state=READY).plain
+	assert "⊘" in plain and "ready" in plain
+	assert plain.index("ready") < plain.index("bv")
+
+
+def test_a_worktree_state_is_backward_compatible_on_the_card_functions():
+	# None (the default) and NONE both reproduce the pre-worktree render exactly,
+	# so the app's later wiring cannot disturb any existing caller.
+	assert card_text(bean(), 40).plain == card_text(bean(), 40, worktree_state=None).plain
+	assert card_text(bean(), 40).plain == card_text(bean(), 40, worktree_state=NONE).plain
 
 
 # -- widget ---------------------------------------------------------------
@@ -664,3 +727,41 @@ async def test_cards_re_expand_after_the_terminal_grows_back(board, pilot):
 
 	await settle(120)
 	assert board._width == full
+
+
+@board_test
+async def test_a_ready_worktree_state_badges_only_its_own_card(board, pilot):
+	# The dict is keyed by bean id, so only the bean that owns the READY branch
+	# is badged -- the rest of the column carries no worktree and stays blank.
+	items = many(3)
+	board.set_beans(items, worktree_states={"bv-0001": READY})
+	await pilot.pause()
+	rendered = [c.content.plain for c in cards(board, "todo")]
+	assert "ready" in rendered[1]
+	assert "ready" not in rendered[0]
+	assert "ready" not in rendered[2]
+
+
+@board_test
+async def test_set_beans_without_worktree_states_renders_no_badge(board, pilot):
+	# The current callers pass nothing; the board must render exactly as before.
+	board.set_beans(many(3))
+	await pilot.pause()
+	assert all("ready" not in c.content.plain for c in cards(board, "todo"))
+
+
+@board_test
+async def test_a_branch_reaching_ready_repaints_its_card_in_place(board, pilot):
+	# The worktree dict is part of set_beans' skip check, so a state change with
+	# no bean moving still has to repaint -- otherwise the badge never appears.
+	items = many(3)
+	board.set_beans(items)
+	await pilot.pause()
+	before = list(board.query(BeanCard))
+	assert "ready" not in cards(board, "todo")[1].content.plain
+
+	board.set_beans(items, worktree_states={"bv-0001": READY})
+	await pilot.pause()
+	# Reused in place, not remounted -- the scroll offset and cursor are kept.
+	assert list(board.query(BeanCard)) == before
+	assert "ready" in cards(board, "todo")[1].content.plain

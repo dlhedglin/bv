@@ -1,14 +1,14 @@
 ---
 # bv-t5fb
 title: 'Review key: dispatch code-review on a worktree branch'
-status: todo
+status: completed
 type: task
 priority: normal
 tags:
     - agents
     - review
 created_at: 2026-08-25T18:47:52Z
-updated_at: 2026-08-25T18:47:52Z
+updated_at: 2026-08-31T15:56:23Z
 parent: bv-clrs
 blocked_by:
     - bv-swjd
@@ -55,3 +55,9 @@ Reuses ConfirmDispatch.
 Reuses the existing `/code-review` skill rather than a bespoke prompt.
 Blocked-by base-recording for a non-main target, though it can default to main
 in the interim.
+
+
+
+## Notes (shipped)
+
+`R` key -> `action_review_worktree`. Offered only when the bean's worktree is `ready`; otherwise a no-op notify. Builds an S-style dispatch (`dispatch.review_request_for`, cwd = main checkout, `worktree=None`) whose prompt (`review_prompt_for`) runs `/code-review` on `worktree-<id>` vs its recorded base and appends findings to the bean with `beans update <id> --body-append` -- never merges, never edits code, never enters the worktree. Reuses `ConfirmDispatch`.

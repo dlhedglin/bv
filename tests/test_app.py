@@ -22,12 +22,13 @@ from pathlib import Path
 from textual.widgets import DataTable, Input
 
 from bv.agents import Session
-from bv.app import BeansViewer, resolve_root
+from bv.app import BeansViewer, ConfirmWorktreeDelete, resolve_root
 from bv.beans import Bean
 from bv.board import BeanBoard, BeanCard
 from bv.dispatch import ConfirmDispatch, PickBase
 from bv.mission import MissionControl
 from bv.preview import BeanPreview
+from bv.worktree import MERGED, NONE, READY
 
 Scenario = Callable[[BeansViewer, object], Awaitable[None]]
 
@@ -704,3 +705,153 @@ def test_a_session_composing_a_reply_does_not_toast_until_it_waits(tmp_path, mon
 	app._sessions = [sess("blocked")]
 	app._announce_needs_input()
 	assert len(toasts) == 2
+
+
+# -- the worktree column, review key and guarded delete -------------------
+#
+# bv-clrs's close-the-loop surface. The board gains a per-bean worktree state
+# column; `R` reviews a ready branch from the main checkout; `D` removes a
+# worktree, guarded so a plain remove never discards unmerged or uncommitted
+# work. Every git read is monkeypatched -- the app tests never touch a repo.
+
+
+def _canned_states(monkeypatch, states: dict[str, str]) -> None:
+	"""Stub the per-poll worktree-state read with a fixed map (bean id -> state)."""
+	monkeypatch.setattr("bv.app.worktree_states", lambda _root, ids: {bid: states.get(bid, NONE) for bid in ids})
+
+
+def test_the_worktree_column_paints_ready_and_leaves_the_rest_blank(tmp_path, monkeypatch):
+	# bv-27nd. A finished, unmerged branch reads "ready" in its own row; a bean
+	# with no worktree shows nothing, so the column marks out the few that matter.
+	root = make_project(tmp_path, "bv")
+	canned(monkeypatch, [_bean("bv-aaaa"), _bean("bv-bbbb")])
+	_canned_states(monkeypatch, {"bv-aaaa": READY})
+
+	async def scenario(app, pilot):
+		assert app._worktrees["bv-aaaa"] == "ready"
+		table = app.query_one(DataTable)
+		assert table.get_cell("bv-aaaa", "worktree").plain == "ready"
+		assert table.get_cell("bv-bbbb", "worktree").plain == ""
+
+	drive(root, scenario)
+
+
+def test_the_worktree_state_reaches_the_board_cards(tmp_path, monkeypatch):
+	# The same state feeds the kanban card badge, so `b` shows the ready branch too.
+	root = make_project(tmp_path, "bv")
+	canned(monkeypatch, [_bean("bv-aaaa")])
+	_canned_states(monkeypatch, {"bv-aaaa": READY})
+
+	async def scenario(app, pilot):
+		await pilot.press("b")
+		await pilot.pause()
+		assert app.query_one(BeanBoard).set_beans  # board is up
+		card = next(c for c in app.query(BeanCard))
+		assert "ready" in card.render().plain
+
+	drive(root, scenario)
+
+
+def test_review_is_a_no_op_without_a_ready_worktree(tmp_path, monkeypatch):
+	# bv-t5fb. `R` is offered only for a ready branch; anything else notifies and
+	# pushes no dispatch confirmation.
+	root = make_project(tmp_path, "bv")
+	canned(monkeypatch, [_bean("bv-aaaa")])
+	_canned_states(monkeypatch, {"bv-aaaa": NONE})
+
+	async def scenario(app, pilot):
+		toasts: list = []
+		monkeypatch.setattr(app, "notify", lambda message, **kwargs: toasts.append(message))
+		await app.run_action("review_worktree")
+		await pilot.pause()
+		assert not isinstance(app.screen, ConfirmDispatch)
+		assert any("no ready worktree" in t for t in toasts)
+
+	drive(root, scenario)
+
+
+def test_review_dispatches_an_s_style_job_in_the_checkout(tmp_path, monkeypatch):
+	# The review runs in the main checkout, never the worktree, so its findings
+	# reach the board's bean rather than the branch's trapped `.beans`.
+	root = make_project(tmp_path, "bv")
+	canned(monkeypatch, [_bean("bv-aaaa")])
+	_canned_states(monkeypatch, {"bv-aaaa": READY})
+	monkeypatch.setattr("bv.app.recorded_base", lambda _root, _id: "main")
+
+	async def scenario(app, pilot):
+		await app.run_action("review_worktree")
+		await pilot.pause()
+		assert isinstance(app.screen, ConfirmDispatch)
+		request = app.screen.request
+		assert request.worktree is None  # S-style, not isolated
+		assert request.cwd == root  # the checkout, not a worktree path
+		assert "/code-review" in request.prompt
+		await pilot.press("escape")  # never actually spawn
+
+	drive(root, scenario)
+
+
+def test_delete_is_a_no_op_when_there_is_no_worktree(tmp_path, monkeypatch):
+	# bv-gz14. `D` on a bean with no worktree says so and touches nothing.
+	root = make_project(tmp_path, "bv")
+	canned(monkeypatch, [_bean("bv-aaaa")])
+	_canned_states(monkeypatch, {"bv-aaaa": NONE})
+
+	async def scenario(app, pilot):
+		toasts: list = []
+		monkeypatch.setattr(app, "notify", lambda message, **kwargs: toasts.append(message))
+		await app.run_action("delete_worktree")
+		await pilot.pause()
+		assert not isinstance(app.screen, ConfirmWorktreeDelete)
+		assert any("no worktree" in t for t in toasts)
+
+	drive(root, scenario)
+
+
+def test_delete_refuses_an_unmerged_branch_without_a_force(tmp_path, monkeypatch):
+	# Unmerged commits would be lost, so the confirm is the force face and names
+	# what is at stake rather than a bare "are you sure".
+	root = make_project(tmp_path, "bv")
+	canned(monkeypatch, [_bean("bv-aaaa")])
+	_canned_states(monkeypatch, {"bv-aaaa": READY})
+	monkeypatch.setattr("bv.app.merged_verdict", lambda _root, _id: False)
+	monkeypatch.setattr("bv.app.worktree_dirty", lambda _root, _id: False)
+
+	async def scenario(app, pilot):
+		await app.run_action("delete_worktree")
+		await pilot.pause()
+		assert isinstance(app.screen, ConfirmWorktreeDelete)
+		assert app.screen.needs_force is True
+		assert "unmerged" in app.screen.reason
+		await pilot.press("escape")
+
+	drive(root, scenario)
+
+
+def test_delete_of_a_merged_clean_worktree_removes_without_a_force(tmp_path, monkeypatch):
+	# A merged, clean branch loses nothing: no force, and the removal runs on
+	# confirm with force=False.
+	root = make_project(tmp_path, "bv")
+	canned(monkeypatch, [_bean("bv-aaaa")])
+	_canned_states(monkeypatch, {"bv-aaaa": MERGED})
+	monkeypatch.setattr("bv.app.merged_verdict", lambda _root, _id: True)
+	monkeypatch.setattr("bv.app.worktree_dirty", lambda _root, _id: False)
+	removed: list = []
+	monkeypatch.setattr(
+		"bv.app.remove_worktree",
+		lambda _root, worktree, *, force=False: (
+			removed.append((worktree, force)) or (True, f"removed worktree-{worktree}")
+		),
+	)
+
+	async def scenario(app, pilot):
+		await app.run_action("delete_worktree")
+		await pilot.pause()
+		assert isinstance(app.screen, ConfirmWorktreeDelete)
+		assert app.screen.needs_force is False
+		await pilot.press("enter")
+		await pilot.pause()
+		await pilot.pause()
+		assert removed == [("bv-aaaa", False)]
+
+	drive(root, scenario)
