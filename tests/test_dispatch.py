@@ -18,7 +18,7 @@ from pathlib import Path
 
 from textual.app import App
 from textual.geometry import Region
-from textual.widgets import Static
+from textual.widgets import Input, Static
 
 from bv.agents import Session, attribute
 from bv.beans import Bean
@@ -28,12 +28,14 @@ from bv.dispatch import (
 	GIT,
 	HINT,
 	IN_PROGRESS,
+	NOTE_HEADER,
 	SCRAPPED,
 	TITLE,
 	ConfirmDispatch,
 	DispatchRequest,
 	PickBase,
 	already_working,
+	append_note,
 	branch_for,
 	can_dispatch,
 	current_branch,
@@ -251,6 +253,36 @@ def test_the_prompt_no_longer_scales_with_the_body():
 	# children query landed; the guard is that it stays a constant, not a
 	# number.
 	assert len(huge) < 1_200
+
+
+# -- the per-spawn note ---------------------------------------------------
+
+
+def test_a_note_is_appended_under_a_header_that_marks_it_as_the_dispatchers():
+	# The confirm dialog lets the user add free text to this one spawn; it rides
+	# the end of the prompt, tagged so the agent never reads it as part of the bean.
+	base = prompt_for(bean())
+	noted = append_note(base, "focus on the retry path first")
+	assert noted.startswith(base)
+	assert NOTE_HEADER in noted
+	assert noted.endswith("focus on the retry path first")
+
+
+def test_an_empty_note_leaves_the_prompt_byte_for_byte():
+	# The field is optional and usually blank; the common S/W path must be exactly
+	# the prompt request_for built, no trailing header on an empty line.
+	base = prompt_for(bean())
+	assert append_note(base, "") == base
+	assert append_note(base, "   \t ") == base
+
+
+def test_a_note_cannot_smuggle_a_nul_that_truncates_argv():
+	# The note joins the single prompt argument claude is handed, where a NUL
+	# silently truncates everything after it -- the same argv hazard the title is
+	# stripped for.
+	noted = append_note(prompt_for(bean()), "before\x00after")
+	assert "\x00" not in noted
+	assert "beforeafter" in noted
 
 
 # -- the request ----------------------------------------------------------
@@ -724,6 +756,31 @@ def test_confirming_does_not_itself_spawn_anything(monkeypatch):
 		assert app.result == screen.request
 
 	show(scenario)
+
+
+@screen_test
+async def test_a_typed_note_rides_the_prompt_the_caller_gets(app, screen, pilot):
+	# The whole feature: free text the dispatcher adds to this one spawn is folded
+	# onto the end of the prompt the caller receives, under the header that keeps
+	# it distinct from the bean's own instructions.
+	screen.query_one("#dispatch-note", Input).value = "focus on the retry path"
+	await pilot.press("enter")
+	await pilot.pause()
+	assert app.result is not None
+	assert app.result.prompt.startswith(screen.request.prompt)
+	assert NOTE_HEADER in app.result.prompt
+	assert app.result.prompt.endswith("focus on the retry path")
+
+
+@screen_test
+async def test_the_note_field_holds_the_focus_so_enter_confirms_from_it(app, screen, pilot):
+	# The input is focused on mount, so it consumes enter -- the confirm has to be
+	# wired from the input's own submit or the key dies in the field. With an empty
+	# note the caller still gets exactly the request the dialog showed.
+	assert app.focused is screen.query_one("#dispatch-note", Input)
+	await pilot.press("enter")
+	await pilot.pause()
+	assert app.result == screen.request
 
 
 def test_a_title_full_of_brackets_is_shown_exactly_as_it_will_be_sent():

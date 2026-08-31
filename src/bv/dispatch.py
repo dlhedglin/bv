@@ -19,13 +19,14 @@ working the bean, and then dispatches anyway if you press enter. beans has no
 assignee field to hold a claim, so there is nothing a second bv -- or a `claude`
 typed by hand -- would have to respect. See `ALREADY_WORKING`.
 
-**bv still never writes; the prompt asks the agent to.** The prompt tells a
-dispatched agent to set its own bean to `in-progress` on start and `completed`
-when the work is genuinely done -- see `prompt_for`. That is not a reversal of
-"bv is read-only": every write is the agent's own, in the agent's own repo,
-through the agent's own CLI, and this process never issues `beans update` nor
-learns whether one ran. What changed is what bv *asks for*, which is text in a
-prompt.
+**The dispatch path never writes; the prompt asks the agent to.** The prompt
+tells a dispatched agent to set its own bean to `in-progress` on start and
+`completed` when the work is genuinely done -- see `prompt_for`. Every write on
+*this* path is the agent's own, in the agent's own repo, through the agent's own
+CLI, and dispatch never issues `beans update` nor learns whether one ran. What
+changed is what bv *asks for*, which is text in a prompt. (The one place bv
+itself writes is `edit.py`, behind the `e` key and its #208 guard -- a separate
+path from anything here.)
 
 Two consequences of beans 0.4.2 shipping #205 and #208 unpatched, now that
 something does write:
@@ -34,7 +35,9 @@ something does write:
   today, since every bv bean carries only keys beans itself owns. It does make
   the README's sidecar rule load-bearing rather than precautionary: the moment
   bv writes metadata into bean frontmatter, a dispatched agent's own status
-  update deletes it.
+  update deletes it. The interactive editor guards its own writes against this
+  by refusing a bean that carries an unknown key; the dispatch prompt cannot,
+  since the write is the agent's.
 - #205 (`--if-match` CAS loses one of two concurrent writes) now has a live path
   to it, because two agents on one bean is exactly the case `ALREADY_WORKING`
   declines to lock against. That stays advisory. Named here as a failure mode,
@@ -61,7 +64,7 @@ from __future__ import annotations
 
 import subprocess
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import ClassVar, TypeGuard
 
@@ -70,7 +73,7 @@ from textual.app import ComposeResult
 from textual.binding import Binding, BindingType
 from textual.containers import Vertical, VerticalScroll
 from textual.screen import ModalScreen
-from textual.widgets import OptionList, Static
+from textual.widgets import Input, OptionList, Static
 from textual.widgets.option_list import Option
 
 from .agents import session_name_for
@@ -120,6 +123,7 @@ appears only to be forbidden."""
 
 TITLE = "spawn a background agent?"
 HINT = "[enter] dispatch   [esc] cancel"
+NOTE_PLACEHOLDER = "extra instructions for the agent (optional)"
 
 ALREADY_WORKING = "{label} is already working this bean"
 """Said, not enforced.
@@ -137,12 +141,13 @@ tokens, which is exactly what a dialog they are already reading can give them.
 
 Only ever exact attribution -- see `app._agent_on`."""
 
-CHROME_HEIGHT = 10
+CHROME_HEIGHT = 15
 """What the dialog spends on everything that is not the prompt: two rows of
 border, two of padding, one title, two for the cwd/name pair, two for the
-prompt's own margins and one for the hint. Measured off the rendered widget
-regions rather than counted off the CSS, and used to keep the prompt from
-pushing the hint out of the dialog on a short terminal."""
+prompt's own margins, one for the hint, and five for the note input (three for
+the framed field, two for its margins). Measured off the rendered widget regions
+rather than counted off the CSS, and used to keep the prompt from pushing the
+hint out of the dialog on a short terminal."""
 
 WARNING_HEIGHT = 1
 """The extra row of chrome a warning line costs, added to CHROME_HEIGHT only
@@ -361,6 +366,35 @@ def prompt_for(bean: Bean, *, worktree: bool = False) -> str:
 		f"`beans update` fails, stop and say so, same as above --\n"
 		f"do not retry it into a different status."
 	)
+
+
+NOTE_HEADER = "Also, from whoever dispatched you:"
+"""Introduces the confirm-dialog note before the agent's own bean instructions
+have been read, so free text the dispatcher typed is never mistaken for part of
+the bean. `prompt_for` owns the standing prompt; this line is the seam a
+per-spawn note is glued on at."""
+
+
+def append_note(prompt: str, note: str) -> str:
+	"""Glue a dispatcher's free-text note onto the end of a spawn prompt.
+
+	The note is whatever the user typed in `ConfirmDispatch`'s input -- a nudge
+	that belongs to this one spawn and not to every agent the bean will ever get,
+	so it rides the prompt rather than the bean. Empty (the common case: the
+	field is optional and usually blank) returns the prompt untouched, so an `S`
+	or `W` with no note is byte-for-byte the prompt it always was.
+
+	Sanitised like the title is, and for the same argv reason: the note becomes
+	part of the single prompt argument `claude` is handed, and a NUL there
+	truncates everything after it silently. The input is single-line, so newlines
+	cannot arrive, but the NUL guard is cheap and the failure it prevents is
+	invisible. Trailing and leading whitespace is stripped so a stray space bar
+	does not count as a note and push the header onto an empty line.
+	"""
+	clean = note.replace("\x00", "").strip()
+	if not clean:
+		return prompt
+	return f"{prompt}\n\n{NOTE_HEADER}\n\n{clean}"
 
 
 def _argv_safe(text: str) -> str:
@@ -802,6 +836,10 @@ class ConfirmDispatch(ModalScreen[DispatchRequest | None]):
             background: $panel;
         }
 
+        & #dispatch-note {
+            margin: 1 0;
+        }
+
         & .dispatch--title {
             text-style: bold;
         }
@@ -845,15 +883,26 @@ class ConfirmDispatch(ModalScreen[DispatchRequest | None]):
 				yield Static(Text(self.warning), classes="dispatch--warning")
 			with VerticalScroll(id="dispatch-prompt"):
 				yield Static(Text(self.request.prompt))
+			# Optional free-text the dispatcher can add to this one spawn -- see
+			# `append_note`. Below the prompt so it reads as an addition to what
+			# the agent is already being told, not a replacement for it.
+			yield Input(placeholder=NOTE_PLACEHOLDER, id="dispatch-note")
 			yield Static(Text(HINT), classes="dispatch--hint")
 
 	def on_mount(self) -> None:
 		self._fit_prompt()
-		# Focus the prompt, not the dialog: the body is the part worth reading
-		# before saying yes, and this makes the arrow keys scroll it without a
-		# tab first. `enter` and `escape` still reach the screen, because keys
-		# bubble from the focused widget and neither is bound below it.
-		self.query_one("#dispatch-prompt").focus()
+		# Focus the note input, not the prompt: the prompt is a fixed block of
+		# instructions since bv-x62m, short enough to take in without scrolling,
+		# so the cursor is more use waiting in the one field the user might type
+		# in. `enter` in the input submits (see `on_input_submitted`) and `escape`
+		# still reaches the screen, since Input binds neither and keys bubble.
+		self.query_one("#dispatch-note").focus()
+
+	def on_input_submitted(self, event: Input.Submitted) -> None:
+		# Enter in the note field confirms, the same as enter anywhere else on the
+		# dialog -- the input consumes the key, so the screen's `enter` binding
+		# never sees it and the confirm has to be wired from here too.
+		self.action_confirm()
 
 	def on_resize(self) -> None:
 		self._fit_prompt()
@@ -879,7 +928,11 @@ class ConfirmDispatch(ModalScreen[DispatchRequest | None]):
 		self.query_one("#dispatch-prompt").styles.max_height = room
 
 	def action_confirm(self) -> None:
-		self.dismiss(self.request)
+		# Fold the note into the prompt only now, at confirm: the request stays the
+		# thing the dialog showed, with the one field the dialog let the user add.
+		# Empty input leaves the prompt byte-for-byte what `request_for` built.
+		note = self.query_one("#dispatch-note", Input).value
+		self.dismiss(replace(self.request, prompt=append_note(self.request.prompt, note)))
 
 	def action_cancel(self) -> None:
 		self.dismiss(None)
