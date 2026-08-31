@@ -5,10 +5,11 @@ status: completed
 type: task
 priority: normal
 tags:
-    - ui
     - agents
+    - game
+    - ui
 created_at: 2026-08-21T18:55:23Z
-updated_at: 2026-08-21T19:01:49Z
+updated_at: 2026-08-29T16:35:38Z
 parent: bv-9gnt
 ---
 

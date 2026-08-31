@@ -1,14 +1,14 @@
 ---
 # bv-9gnt
 title: 'Agents view: project-scoped mission-control grid of live sessions'
-status: in-progress
+status: completed
 type: feature
 priority: normal
 tags:
     - ui
     - agents
 created_at: 2026-08-21T17:25:26Z
-updated_at: 2026-08-21T17:28:46Z
+updated_at: 2026-08-29T18:57:57Z
 ---
 
 A project-level "mission control" screen: press a key on a project (or its
