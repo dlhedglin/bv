@@ -1,13 +1,14 @@
 ---
 # bv-swjd
 title: Record the worktree base at creation
-status: todo
+status: completed
 type: task
+priority: normal
 tags:
     - worktree
     - agents
 created_at: 2026-08-25T18:47:52Z
-updated_at: 2026-08-25T18:47:52Z
+updated_at: 2026-08-31T14:58:30Z
 parent: bv-clrs
 ---
 

@@ -25,6 +25,7 @@ from bv.beans import Bean
 from bv.dispatch import (
 	CLAUDE,
 	COMPLETED,
+	DEFAULT_BASE,
 	GIT,
 	HINT,
 	IN_PROGRESS,
@@ -43,6 +44,7 @@ from bv.dispatch import (
 	display_path,
 	local_branches,
 	prompt_for,
+	recorded_base,
 	request_for,
 	show_command,
 	update_command,
@@ -533,8 +535,9 @@ def test_a_w_dispatch_cuts_the_worktree_then_spawns_claude(tmp_path):
 	req = request_for(bean(), tmp_path, worktree=True, base="main")
 	result = dispatch(req, runner)
 	assert result.ok
-	assert len(runner.calls) == 2
-	(cut, cut_kwargs), (spawn, spawn_kwargs) = runner.calls
+	# Three subprocesses now: cut the tree, record its base, then run claude.
+	assert len(runner.calls) == 3
+	(cut, cut_kwargs), _record, (spawn, spawn_kwargs) = runner.calls
 	assert cut[:3] == [GIT, "worktree", "add"]
 	assert "-b" in cut and branch_for("bv-9sxj") in cut
 	assert str(req.cwd) in cut  # the worktree path git creates
@@ -551,6 +554,26 @@ def test_a_w_dispatch_without_a_base_lets_git_default_to_head(tmp_path):
 	dispatch(request_for(bean(), tmp_path, worktree=True), runner)
 	cut = runner.calls[0][0]
 	assert cut[-1] == str(worktree_path_for(tmp_path, "bv-9sxj"))  # path, no base after it
+
+
+def test_a_w_dispatch_records_the_chosen_base_in_git_config(tmp_path):
+	# The whole point of the bean: the picked base is written git-natively so
+	# review and merge can recover it after the request is gone.
+	runner = FakeRunner()
+	dispatch(request_for(bean(), tmp_path, worktree=True, base="release-2"), runner)
+	record = runner.calls[1][0]  # between the cut and the claude spawn
+	assert record[:2] == [GIT, "config"]
+	assert record == [GIT, "config", f"branch.{branch_for('bv-9sxj')}.bvBase", "release-2"]
+	assert runner.calls[1][1]["cwd"] == str(tmp_path)  # written in the checkout
+
+
+def test_a_head_cut_records_nothing_and_leans_on_the_default(tmp_path):
+	# No pick, no base to name -- so no config write, and `recorded_base` defaults
+	# such a worktree to main rather than inventing a branch it never forked from.
+	runner = FakeRunner()
+	dispatch(request_for(bean(), tmp_path, worktree=True), runner)
+	assert len(runner.calls) == 2  # cut, then claude -- no config in between
+	assert not any("config" in call[0] for call in runner.calls)
 
 
 def test_a_failed_worktree_cut_is_reported_and_claude_never_runs(tmp_path):
@@ -606,6 +629,30 @@ def test_current_branch_is_none_on_a_detached_head_or_a_failure():
 	assert current_branch(Path("/x"), FakeRunner(stdout="main\n")) == "main"
 	assert current_branch(Path("/x"), FakeRunner(stdout="\n")) is None  # detached prints nothing
 	assert current_branch(Path("/x"), FakeRunner(returncode=1)) is None
+
+
+# -- reading the base back ------------------------------------------------
+
+
+def test_recorded_base_reads_the_branch_config_dispatch_wrote():
+	runner = FakeRunner(stdout="release-2\n")
+	assert recorded_base(Path("/repos/bv"), "bv-9sxj", runner) == "release-2"
+	# The exact key `dispatch` writes, read in the repo the branch lives in.
+	assert runner.command == [GIT, "config", f"branch.{branch_for('bv-9sxj')}.bvBase"]
+	assert runner.kwargs["cwd"] == "/repos/bv"
+
+
+def test_recorded_base_defaults_to_main_when_unset():
+	# A HEAD cut records nothing, so `git config` exits nonzero with the key
+	# absent -- and the reader answers main rather than raising.
+	assert recorded_base(Path("/x"), "bv-9sxj", FakeRunner(returncode=1)) == DEFAULT_BASE
+	assert DEFAULT_BASE == "main"
+
+
+def test_recorded_base_survives_a_broken_repo():
+	# Best-effort like `local_branches`: no git, not a repo -- still main.
+	assert recorded_base(Path("/x"), "bv-9sxj", FakeRunner(raises=FileNotFoundError())) == DEFAULT_BASE
+	assert recorded_base(Path("/x"), "bv-9sxj", FakeRunner(stdout="\n")) == DEFAULT_BASE
 
 
 # -- the confirmation screen ----------------------------------------------

@@ -82,6 +82,16 @@ from .beans import Bean
 CLAUDE = "claude"
 GIT = "git"
 
+DEFAULT_BASE = "main"
+"""Where a worktree merges back when its base was never recorded -- a HEAD cut
+with no explicit pick, or a branch whose `bvBase` config was lost. Review and
+merge both need a target, and main is the one every repo the board runs in has."""
+
+BASE_CONFIG_KEY = "bvBase"
+"""The `branch.<branch>.<key>` git-config leaf that records a worktree's base.
+Git-native so it survives with no bv bookkeeping: deleting the branch drops it,
+and no cleanup of bv's own is ever owed."""
+
 COMMAND_FLAGS = ("--bg", "--name")
 """`--bg, --background` and `-n, --name`, both confirmed present in
 `claude --help` on 2.1.233. The long spellings are used so the command reads
@@ -546,6 +556,30 @@ def current_branch(root: Path, runner: Runner = subprocess.run) -> str | None:
 	return proc.stdout.strip() or None
 
 
+def recorded_base(root: Path, worktree: str, runner: Runner = subprocess.run) -> str:
+	"""The base branch `worktree-<worktree>` was cut from, for review and merge.
+
+	Reads the `branch.<branch>.bvBase` `dispatch` wrote at creation. Defaults to
+	`DEFAULT_BASE` -- main -- when unset: a worktree cut from HEAD with no explicit
+	pick records nothing, and so does anything that lost its config. Best-effort
+	like `local_branches`: no git, not a repo, a nonzero exit (the key is absent)
+	all fall through to the default rather than raising."""
+	try:
+		proc = runner(
+			[GIT, "config", f"branch.{branch_for(worktree)}.{BASE_CONFIG_KEY}"],
+			cwd=str(root),
+			capture_output=True,
+			text=True,
+			timeout=DISPATCH_TIMEOUT,
+			check=False,
+		)
+	except (OSError, subprocess.SubprocessError):
+		return DEFAULT_BASE
+	if proc.returncode != 0:
+		return DEFAULT_BASE
+	return proc.stdout.strip() or DEFAULT_BASE
+
+
 def request_for(bean: Bean, project_root: Path, *, worktree: bool = False, base: str | None = None) -> DispatchRequest:
 	"""Everything needed to spawn an agent for `bean`, decided up front.
 
@@ -636,6 +670,17 @@ def dispatch(request: DispatchRequest, runner: Runner = subprocess.run) -> Dispa
 			detail = (cut.stderr or cut.stdout or "").strip().splitlines()
 			first = detail[0] if detail else f"exit {cut.returncode}"
 			return DispatchResult(False, f"{GIT} worktree: {first}")
+		# Record the base git-natively so review and merge can recover the branch
+		# `worktree-<id>` forks from long after the ephemeral `DispatchRequest` is
+		# gone. Only when a base was picked: a HEAD cut has none to name, and
+		# `recorded_base` defaults such worktrees to main. Best-effort -- a failed
+		# write costs the record, not the spawn, and the reader falls back to main.
+		if request.base:
+			record = [GIT, "config", f"branch.{branch_for(request.worktree)}.{BASE_CONFIG_KEY}", request.base]
+			try:
+				runner(record, cwd=str(root), capture_output=True, text=True, timeout=DISPATCH_TIMEOUT, check=False)
+			except (OSError, subprocess.SubprocessError):
+				pass
 	elif not request.cwd.is_dir():
 		return DispatchResult(False, f"{display_path(request.cwd)} is not a directory")
 
