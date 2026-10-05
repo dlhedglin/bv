@@ -32,6 +32,7 @@ from .dispatch import (
 	Runner,
 	branch_for,
 	recorded_base,
+	recorded_base_sha,
 	worktree_path_for,
 )
 
@@ -53,10 +54,13 @@ review and merge. The load-bearing state -- this is the one the column exists to
 surface."""
 
 MERGED = "merged"
-"""Already in its base, directly or as a squash/rebase merge. Transient: it
-vanishes when the branch is cleaned up, and the bean's own status flips to
-completed on merge, so it is partly redundant -- kept only to distinguish a
-merged-but-not-yet-removed branch from one still awaiting merge."""
+"""Committed work that is already in its base, directly or as a squash/rebase
+merge. Transient: it vanishes when the branch is cleaned up, and the bean's own
+status flips to completed on merge, so it is partly redundant -- kept only to
+distinguish a merged-but-not-yet-removed branch from one still awaiting merge.
+
+Requires commits to have been made: a branch that committed nothing has nothing
+to have been merged, and reads `IN_WORKTREE` however its base has moved."""
 
 
 def _read(root: Path, args: list[str], runner: Runner) -> subprocess.CompletedProcess[str] | None:
@@ -123,17 +127,54 @@ def merged_verdict(root: Path, worktree: str, base: str | None = None, runner: R
 	return not any(line.startswith("+") for line in cherry.stdout.splitlines())
 
 
-def _ahead_of_base(root: Path, worktree: str, base: str, runner: Runner) -> bool:
-	"""Whether the branch has any commit its base does not -- work to merge.
+def _count_since(root: Path, worktree: str, since: str, runner: Runner) -> int | None:
+	"""Commits on `worktree-<worktree>` that `since` does not have, or None.
 
-	`git rev-list --count <base>..<branch>`: zero means the branch is level with
-	or behind its base (the agent committed nothing yet), nonzero means there is
-	something to carry. Read only after `merged_verdict` has said not-merged, so
-	a nonzero here is genuinely pending rather than already-applied work."""
-	proc = _read(root, ["rev-list", "--count", f"{base}..{branch_for(worktree)}"], runner)
+	`git rev-list --count <since>..<branch>`. None -- not 0 -- when git could not
+	answer, so the caller can tell "no commits" from "no reading" and fall back
+	rather than treat an unresolvable rev as an empty branch."""
+	proc = _read(root, ["rev-list", "--count", f"{since}..{branch_for(worktree)}"], runner)
 	if proc is None or proc.returncode != 0:
-		return False
-	return (proc.stdout.strip() or "0") != "0"
+		return None
+	try:
+		return int(proc.stdout.strip() or "0")
+	except ValueError:
+		return None
+
+
+def _has_own_commits(root: Path, worktree: str, base: str, runner: Runner) -> bool:
+	"""Whether the agent has committed anything in this worktree yet.
+
+	Counted from the *fork point* (`bvBaseSha`), not from the base branch, and
+	that distinction is the whole point. A base branch moves: a worktree cut from
+	main and left alone while main advances is neither ahead of main nor holding
+	work, and every base-relative test -- ancestor-of-base, `git cherry`, a
+	`base..branch` count -- reads it as indistinguishable from merged. The fork
+	point is pinned at creation and cannot drift, so counting from it answers the
+	one question those tests cannot: did anything get committed at all.
+
+	Falls back to a `base..branch` count when no sha is recorded (a worktree from
+	before bv pinned fork points) or when the recorded sha will not resolve (a
+	rewritten history). The fallback still cannot see a fast-forward-merged
+	branch as merged -- it reads `in-worktree` -- which is the safe direction to
+	be wrong in: it under-claims progress rather than announcing work as landed
+	before the agent has written a line."""
+	sha = recorded_base_sha(root, worktree, runner)
+	if sha is not None:
+		count = _count_since(root, worktree, sha, runner)
+		if count is not None:
+			return count > 0
+	return (_count_since(root, worktree, base, runner) or 0) > 0
+
+
+def has_own_commits(root: Path, worktree: str, runner: Runner = subprocess.run) -> bool:
+	"""Whether anything has been committed in `worktree-<worktree>` since it was cut.
+
+	The one-bean form of what `worktree_states` asks per poll, for callers that
+	hold a single bean and no base -- the delete guard, which needs to tell a
+	genuinely merged branch from one that never committed, since `merged_verdict`
+	says yes to both."""
+	return _has_own_commits(root, worktree, recorded_base(root, worktree, runner), runner)
 
 
 def worktree_states(root: Path, bean_ids: list[str], runner: Runner = subprocess.run) -> dict[str, str]:
@@ -155,12 +196,17 @@ def worktree_states(root: Path, bean_ids: list[str], runner: Runner = subprocess
 			states[bean_id] = NONE
 			continue
 		base = recorded_base(root, bean_id, runner)
-		if merged_verdict(root, bean_id, base, runner):
-			states[bean_id] = MERGED
-		elif _ahead_of_base(root, bean_id, base, runner):
-			states[bean_id] = READY
-		else:
+		# "Has it committed anything" is asked *first*, and every merged reading
+		# is downstream of a yes. Asked the other way round -- the order this
+		# started out in -- a branch cut seconds ago is trivially an ancestor of
+		# its base, so `merged_verdict` says yes and the column announced every
+		# brand-new worktree as merged before its agent had written a line.
+		if not _has_own_commits(root, bean_id, base, runner):
 			states[bean_id] = IN_WORKTREE
+		elif merged_verdict(root, bean_id, base, runner):
+			states[bean_id] = MERGED
+		else:
+			states[bean_id] = READY
 	return states
 
 

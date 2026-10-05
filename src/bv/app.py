@@ -76,6 +76,7 @@ from .watch import Watcher
 from .worktree import NONE as WT_NONE
 from .worktree import READY as WT_READY
 from .worktree import (
+	has_own_commits,
 	merged_verdict,
 	remove_worktree,
 	worktree_dirty,
@@ -266,7 +267,10 @@ class ConfirmWorktreeDelete(ModalScreen[bool]):
 			if self.needs_force:
 				body = Text(f"This would lose work -- {self.reason}. Removing discards it.", style="bold red")
 			else:
-				body = Text("Merged and clean: nothing is lost.", style="dim")
+				# `reason` names *why* nothing is at stake -- merged, or never
+				# committed to in the first place -- rather than claiming a merge
+				# that a brand-new worktree never had.
+				body = Text(f"{self.reason.capitalize()} and clean: nothing is lost.", style="dim")
 			yield Static(body, classes="delete--body")
 			verb = "force remove" if self.needs_force else "remove"
 			yield Static(Text(f"[enter] {verb}   [esc] cancel"), classes="delete--hint")
@@ -912,11 +916,17 @@ class BeansViewer(App):
 		mean a plain `git worktree remove` / `git branch -d` would refuse or
 		discard work, so a force confirm is required; the reason names which, so
 		the dialog can say what is at stake rather than a bare "are you sure".
+
+		The safe case splits two ways for the dialog's benefit. `merged_verdict`
+		answers "is there unmerged work here", and a worktree whose agent has
+		committed nothing passes it trivially -- true, and nothing is at stake,
+		but calling that *merged* to the user's face would claim a merge that
+		never happened. `has_own_commits` separates the two readings.
 		"""
 		merged = merged_verdict(root, bean_id)
 		dirty = worktree_dirty(root, bean_id)
 		if merged and not dirty:
-			return (False, "merged")
+			return (False, "merged" if has_own_commits(root, bean_id) else "nothing committed")
 		reasons = []
 		if not merged:
 			reasons.append("unmerged commits")

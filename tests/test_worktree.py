@@ -43,6 +43,12 @@ class Router:
 	call, standing in for a missing git. Every call is recorded on `.calls` as
 	the `(command, kwargs)` pair `test_dispatch`'s `FakeRunner` records, so a
 	test can assert the exact argv git was handed.
+
+	`config` takes a finer key too, `config:<leaf>` -- `config:bvBase`,
+	`config:bvBaseSha` -- because the two config reads a lifecycle question makes
+	want different answers (a branch name and a commit), and a bare `config` key
+	would hand the same string to both. A plain `config` key still answers
+	whatever `config:<leaf>` does not.
 	"""
 
 	def __init__(self, results=None, default=None, raises=None):
@@ -55,7 +61,12 @@ class Router:
 		self.calls.append((list(command), kwargs))
 		if self._raises is not None:
 			raise self._raises
-		return self._results.get(_subcommand(command), self._default)
+		sub = _subcommand(command)
+		if sub == "config":
+			leaf = command[-1].rsplit(".", 1)[-1] if len(command) == 3 else None
+			if leaf is not None and f"config:{leaf}" in self._results:
+				return self._results[f"config:{leaf}"]
+		return self._results.get(sub, self._default)
 
 	def sub_calls(self, sub: str) -> list[list[str]]:
 		"""Just the argv lists whose subcommand is `sub`."""
@@ -89,41 +100,80 @@ def test_a_branchless_bean_is_none_and_spends_no_git_on_itself():
 	assert router.calls[0][0] == [GIT, "branch", "--format=%(refname:short)"]
 
 
+def _live(**results):
+	"""A Router for one bean whose `worktree-bv-1` branch exists, base main."""
+	branch = branch_for("bv-1")
+	return Router(
+		results={
+			"branch": result(stdout=f"main\n{branch}\n"),
+			"config:bvBase": result(stdout="main\n"),
+			"config:bvBaseSha": result(stdout="f0f0f0\n"),
+			**results,
+		}
+	)
+
+
 def test_a_branch_is_classified_merged_ready_or_in_worktree():
 	# The three live states, each a different fold of the same reads: `config`
-	# gives the base, then merged_verdict (merge-base/cherry) and, only if
-	# unmerged, _ahead_of_base (rev-list --count) decide between them.
-	branch = branch_for("bv-1")
-	present = result(stdout=f"main\n{branch}\n")
-	base = result(stdout="main\n")
+	# gives the base and the fork point, `rev-list --count` from the fork point
+	# says whether anything was committed at all, and only then does
+	# merged_verdict (merge-base/cherry) split merged from ready.
 
-	# merged: ancestor of base, so merge-base --is-ancestor exits 0.
-	merged = Router(results={"branch": present, "config": base, "merge-base": result(returncode=0)})
+	# merged: commits were made, and they are an ancestor of base.
+	merged = _live(**{"rev-list": result(stdout="2\n"), "merge-base": result(returncode=0)})
 	assert worktree_states(Path("/repos/bv"), ["bv-1"], merged) == {"bv-1": MERGED}
 
-	# ready: not merged (is-ancestor fails, cherry shows a `+`) and ahead (count > 0).
-	ready = Router(
-		results={
-			"branch": present,
-			"config": base,
+	# ready: commits made, not merged (is-ancestor fails, cherry shows a `+`).
+	ready = _live(
+		**{
+			"rev-list": result(stdout="2\n"),
 			"merge-base": result(returncode=1),
 			"cherry": result(stdout="+ abc123\n"),
-			"rev-list": result(stdout="2\n"),
 		}
 	)
 	assert worktree_states(Path("/repos/bv"), ["bv-1"], ready) == {"bv-1": READY}
 
-	# in-worktree: not merged, but level with base (count 0) -- nothing to merge.
-	working = Router(
-		results={
-			"branch": present,
-			"config": base,
-			"merge-base": result(returncode=1),
-			"cherry": result(stdout="+ abc123\n"),
+	# in-worktree: nothing committed since the cut -- nothing to merge either way.
+	working = _live(**{"rev-list": result(stdout="0\n")})
+	assert worktree_states(Path("/repos/bv"), ["bv-1"], working) == {"bv-1": IN_WORKTREE}
+
+
+def test_a_freshly_cut_worktree_is_in_worktree_not_merged():
+	# The regression. A branch cut seconds ago is trivially an ancestor of its
+	# base, so `merge-base --is-ancestor` exits 0 and the old order -- merged
+	# asked first -- announced every brand-new worktree as `merged` before its
+	# agent had written a line. Zero commits since the fork point settles it
+	# first, and the ancestry question is never even asked.
+	fresh = _live(**{"rev-list": result(stdout="0\n"), "merge-base": result(returncode=0)})
+	assert worktree_states(Path("/repos/bv"), ["bv-1"], fresh) == {"bv-1": IN_WORKTREE}
+	assert fresh.sub_calls("merge-base") == []
+	assert fresh.sub_calls("cherry") == []
+
+
+def test_commits_are_counted_from_the_fork_point_not_the_moving_base():
+	# Why `bvBaseSha` exists. The base branch moves under a live worktree: main
+	# gains commits while an agent works. Counting from the fork point asks about
+	# the branch's own commits, so a worktree that has committed nothing stays
+	# `in-worktree` however far its base has run ahead.
+	router = _live(**{"rev-list": result(stdout="0\n"), "merge-base": result(returncode=0)})
+	assert worktree_states(Path("/repos/bv"), ["bv-1"], router) == {"bv-1": IN_WORKTREE}
+	assert router.sub_calls("rev-list") == [[GIT, "rev-list", "--count", f"f0f0f0..{branch_for('bv-1')}"]]
+
+
+def test_an_unrecorded_fork_point_falls_back_to_a_base_relative_count():
+	# Worktrees cut before bv pinned fork points have no `bvBaseSha`: the config
+	# read exits nonzero, and the count runs from the base branch instead. Still
+	# answers the load-bearing case -- a fresh worktree reads `in-worktree`, not
+	# `merged`.
+	router = _live(
+		**{
+			"config:bvBaseSha": result(returncode=1),
 			"rev-list": result(stdout="0\n"),
+			"merge-base": result(returncode=0),
 		}
 	)
-	assert worktree_states(Path("/repos/bv"), ["bv-1"], working) == {"bv-1": IN_WORKTREE}
+	assert worktree_states(Path("/repos/bv"), ["bv-1"], router) == {"bv-1": IN_WORKTREE}
+	assert router.sub_calls("rev-list") == [[GIT, "rev-list", "--count", f"main..{branch_for('bv-1')}"]]
 
 
 # -- merged_verdict -------------------------------------------------------

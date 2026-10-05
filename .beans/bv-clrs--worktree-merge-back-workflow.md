@@ -1,13 +1,14 @@
 ---
 # bv-clrs
 title: Worktree merge-back workflow
-status: todo
+status: completed
 type: feature
+priority: normal
 tags:
     - worktree
     - agents
 created_at: 2026-08-25T18:47:52Z
-updated_at: 2026-08-25T18:47:52Z
+updated_at: 2026-08-31T16:13:20Z
 ---
 
 ## Why
@@ -69,3 +70,9 @@ update` run inside a worktree writes the branch's isolated `.beans` and is
 trapped until merge, the same trap as the `W` status write. Base recovery: bv
 records `git config branch.worktree-<id>.bvBase <base>` at creation and falls
 back to main when unset.
+
+
+
+## Notes
+
+Closed 2026-08-31. W merge-back loop shipped: worktree state column (bv-27nd), base recorded at creation (bv-swjd), review key dispatching code-review on the branch (bv-t5fb), and a merged-guarded delete-worktree key (bv-gz14). The /merge-worktrees skill (bv-qlay) was scrapped — the review + delete keys from bv cover the close side without a separate merge skill. bv still runs no merge; agents own every write.

@@ -607,9 +607,13 @@ def test_a_w_dispatch_cuts_the_worktree_then_spawns_claude(tmp_path):
 	req = request_for(bean(), tmp_path, worktree=True, base="main")
 	result = dispatch(req, runner)
 	assert result.ok
-	# Three subprocesses now: cut the tree, record its base, then run claude.
-	assert len(runner.calls) == 3
-	(cut, cut_kwargs), _record, (spawn, spawn_kwargs) = runner.calls
+	# Four subprocesses now: cut the tree, record its base, read back the fork
+	# point it was cut at, then run claude. (The fork-point *write* is skipped
+	# here -- this runner answers every read with empty stdout, so there is no
+	# sha to record; `test_a_w_dispatch_pins_the_fork_point_it_was_cut_at` covers
+	# the write.)
+	assert len(runner.calls) == 4
+	(cut, cut_kwargs), _record, _fork, (spawn, spawn_kwargs) = runner.calls
 	assert cut[:3] == [GIT, "worktree", "add"]
 	assert "-b" in cut and branch_for("bv-9sxj") in cut
 	assert str(req.cwd) in cut  # the worktree path git creates
@@ -639,13 +643,41 @@ def test_a_w_dispatch_records_the_chosen_base_in_git_config(tmp_path):
 	assert runner.calls[1][1]["cwd"] == str(tmp_path)  # written in the checkout
 
 
-def test_a_head_cut_records_nothing_and_leans_on_the_default(tmp_path):
-	# No pick, no base to name -- so no config write, and `recorded_base` defaults
-	# such a worktree to main rather than inventing a branch it never forked from.
+def test_a_head_cut_records_no_base_name_and_leans_on_the_default(tmp_path):
+	# No pick, no base to name -- so no `bvBase` write, and `recorded_base`
+	# defaults such a worktree to main rather than inventing a branch it never
+	# forked from. The fork point is still read: a HEAD cut has no base *name*,
+	# but it forked from a commit like any other.
 	runner = FakeRunner()
 	dispatch(request_for(bean(), tmp_path, worktree=True), runner)
-	assert len(runner.calls) == 2  # cut, then claude -- no config in between
+	assert len(runner.calls) == 3  # cut, rev-parse, then claude
 	assert not any("config" in call[0] for call in runner.calls)
+	assert runner.calls[1][0] == [GIT, "rev-parse", branch_for("bv-9sxj")]
+
+
+def test_a_w_dispatch_pins_the_fork_point_it_was_cut_at(tmp_path):
+	# bvBaseSha. The branch was just cut, so its tip *is* the base commit --
+	# reading it straight back pins the fork point exactly. Without it a fresh
+	# worktree is indistinguishable from a merged one (both ancestors of their
+	# base, nothing ahead), which is what made the board call new worktrees
+	# `merged`; see `worktree.worktree_states`.
+	runner = FakeRunner(stdout="cafe1234\n")
+	dispatch(request_for(bean(), tmp_path, worktree=True, base="main"), runner)
+	branch = branch_for("bv-9sxj")
+	assert runner.calls[2][0] == [GIT, "rev-parse", branch]
+	assert runner.calls[3][0] == [GIT, "config", f"branch.{branch}.bvBaseSha", "cafe1234"]
+	assert runner.calls[3][1]["cwd"] == str(tmp_path)  # written in the checkout
+
+
+def test_an_unreadable_fork_point_costs_the_record_not_the_spawn(tmp_path):
+	# Best-effort like the base write: if `rev-parse` cannot answer, no sha is
+	# invented, nothing is written, and claude still runs. The board falls back to
+	# a base-relative count.
+	runner = FakeRunner(returncode=0, stdout="")
+	result = dispatch(request_for(bean(), tmp_path, worktree=True), runner)
+	assert result.ok
+	assert not any("config" in call[0] for call in runner.calls)
+	assert runner.calls[-1][0][0] == CLAUDE
 
 
 def test_a_failed_worktree_cut_is_reported_and_claude_never_runs(tmp_path):

@@ -28,7 +28,7 @@ from bv.board import BeanBoard, BeanCard
 from bv.dispatch import ConfirmDispatch, PickBase
 from bv.mission import MissionControl
 from bv.preview import BeanPreview
-from bv.worktree import MERGED, NONE, READY
+from bv.worktree import IN_WORKTREE, MERGED, NONE, READY
 
 Scenario = Callable[[BeansViewer, object], Awaitable[None]]
 
@@ -835,6 +835,7 @@ def test_delete_of_a_merged_clean_worktree_removes_without_a_force(tmp_path, mon
 	canned(monkeypatch, [_bean("bv-aaaa")])
 	_canned_states(monkeypatch, {"bv-aaaa": MERGED})
 	monkeypatch.setattr("bv.app.merged_verdict", lambda _root, _id: True)
+	monkeypatch.setattr("bv.app.has_own_commits", lambda _root, _id: True)
 	monkeypatch.setattr("bv.app.worktree_dirty", lambda _root, _id: False)
 	removed: list = []
 	monkeypatch.setattr(
@@ -853,5 +854,29 @@ def test_delete_of_a_merged_clean_worktree_removes_without_a_force(tmp_path, mon
 		await pilot.pause()
 		await pilot.pause()
 		assert removed == [("bv-aaaa", False)]
+
+	drive(root, scenario)
+
+
+def test_delete_of_a_never_committed_worktree_does_not_call_it_merged(tmp_path, monkeypatch):
+	# `merged_verdict` says True for a worktree whose agent committed nothing --
+	# there is no unmerged work, which is the question it answers -- so the safe
+	# face of the dialog would otherwise tell the user a brand-new worktree was
+	# "Merged and clean". Nothing is at stake either way (no force), but the
+	# reason has to name the real one.
+	root = make_project(tmp_path, "bv")
+	canned(monkeypatch, [_bean("bv-aaaa")])
+	_canned_states(monkeypatch, {"bv-aaaa": IN_WORKTREE})
+	monkeypatch.setattr("bv.app.merged_verdict", lambda _root, _id: True)
+	monkeypatch.setattr("bv.app.has_own_commits", lambda _root, _id: False)
+	monkeypatch.setattr("bv.app.worktree_dirty", lambda _root, _id: False)
+
+	async def scenario(app, pilot):
+		await app.run_action("delete_worktree")
+		await pilot.pause()
+		assert isinstance(app.screen, ConfirmWorktreeDelete)
+		assert app.screen.needs_force is False
+		assert app.screen.reason == "nothing committed"
+		await pilot.press("escape")
 
 	drive(root, scenario)

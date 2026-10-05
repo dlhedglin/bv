@@ -92,6 +92,17 @@ BASE_CONFIG_KEY = "bvBase"
 Git-native so it survives with no bv bookkeeping: deleting the branch drops it,
 and no cleanup of bv's own is ever owed."""
 
+BASE_SHA_CONFIG_KEY = "bvBaseSha"
+"""The git-config leaf recording the *commit* a worktree was cut at -- its fork
+point, pinned at creation.
+
+`bvBase` names a branch, which moves. Only the fork point answers "has this
+agent committed anything yet", and without it a fresh worktree is
+indistinguishable from a merged one: both are ancestors of their base with
+nothing ahead of it, which is what made the board call brand-new worktrees
+`merged` (see `worktree.worktree_states`). Recorded even for a HEAD cut, which
+has no base *name* to record -- the fork point exists either way."""
+
 COMMAND_FLAGS = ("--bg", "--name")
 """`--bg, --background` and `-n, --name`, both confirmed present in
 `claude --help` on 2.1.233. The long spellings are used so the command reads
@@ -580,6 +591,30 @@ def recorded_base(root: Path, worktree: str, runner: Runner = subprocess.run) ->
 	return proc.stdout.strip() or DEFAULT_BASE
 
 
+def recorded_base_sha(root: Path, worktree: str, runner: Runner = subprocess.run) -> str | None:
+	"""The commit `worktree-<worktree>` was cut at, or None if unrecorded.
+
+	Reads the `branch.<branch>.bvBaseSha` `dispatch` pinned at creation. None --
+	not a default -- when it is missing: a worktree cut before bv recorded fork
+	points, or one whose config write failed. There is no safe stand-in for a
+	commit, so the caller falls back to a coarser, base-relative reading rather
+	than acting on an invented sha. Best-effort like `recorded_base`."""
+	try:
+		proc = runner(
+			[GIT, "config", f"branch.{branch_for(worktree)}.{BASE_SHA_CONFIG_KEY}"],
+			cwd=str(root),
+			capture_output=True,
+			text=True,
+			timeout=DISPATCH_TIMEOUT,
+			check=False,
+		)
+	except (OSError, subprocess.SubprocessError):
+		return None
+	if proc.returncode != 0:
+		return None
+	return proc.stdout.strip() or None
+
+
 def request_for(bean: Bean, project_root: Path, *, worktree: bool = False, base: str | None = None) -> DispatchRequest:
 	"""Everything needed to spawn an agent for `bean`, decided up front.
 
@@ -770,6 +805,35 @@ def dispatch(request: DispatchRequest, runner: Runner = subprocess.run) -> Dispa
 				runner(record, cwd=str(root), capture_output=True, text=True, timeout=DISPATCH_TIMEOUT, check=False)
 			except (OSError, subprocess.SubprocessError):
 				pass
+		# And pin the fork point. The branch was just cut, so its tip *is* the
+		# base commit -- reading it back is exact and needs no rev to resolve,
+		# including for a HEAD cut that recorded no base name above. This is the
+		# only record of what the worktree started from once its base branch
+		# moves; `worktree.worktree_states` counts commits from here to tell an
+		# agent that has committed nothing from one whose work is already merged.
+		# Best-effort throughout: a lost sha costs precision in the board column,
+		# never the spawn, and the reader falls back to a base-relative count.
+		try:
+			head = runner(
+				[GIT, "rev-parse", branch_for(request.worktree)],
+				cwd=str(root),
+				capture_output=True,
+				text=True,
+				timeout=DISPATCH_TIMEOUT,
+				check=False,
+			)
+			sha = head.stdout.strip() if head.returncode == 0 else ""
+			if sha:
+				runner(
+					[GIT, "config", f"branch.{branch_for(request.worktree)}.{BASE_SHA_CONFIG_KEY}", sha],
+					cwd=str(root),
+					capture_output=True,
+					text=True,
+					timeout=DISPATCH_TIMEOUT,
+					check=False,
+				)
+		except (OSError, subprocess.SubprocessError):
+			pass
 	elif not request.cwd.is_dir():
 		return DispatchResult(False, f"{display_path(request.cwd)} is not a directory")
 
