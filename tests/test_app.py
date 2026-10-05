@@ -527,33 +527,52 @@ def test_the_filter_denominator_counts_only_the_visible_beans(tmp_path, monkeypa
 	drive(root, scenario)
 
 
-def test_scrolling_the_preview_renders_whatever_is_waiting(tmp_path):
+def test_scrolling_the_preview_renders_whatever_is_waiting(tmp_path, monkeypatch):
 	"""The delay must not turn ctrl+f into a lock.
 
 	Scrolling a pane that is still a bean behind would page through the wrong
 	document and then be undone by the render landing on top of it.
+
+	The bean comes through the load, not a hand-fed `show`: the app re-points
+	the pane at the table cursor whenever a load lands, and a load from the
+	real CLI landing mid-test pointed it at an empty table under load. The
+	delay is the preview tests' `UNRACEABLE_DELAY` for the same reason it is
+	there -- the pending state must outlast the layout in between, not 150 ms.
 	"""
+	root = make_project(tmp_path, "bv")
+	canned(monkeypatch, [_bean("bv-zzzz", body="paragraph\n\n" * 200)])
+	monkeypatch.setattr(BeanPreview, "RENDER_DELAY", 5.0)
+
+	async def scroll(pilot, key):
+		await pilot.press(key)
+		# The page is taken a refresh after the key and then animates; an
+		# offset read before the animation lands is a frame of it, not a page.
+		await pilot.pause()
+		await pilot.wait_for_scheduled_animations()
 
 	async def scenario(app, pilot):
+		await app.workers.wait_for_complete()
+		await pilot.pause()
 		preview = app.query_one(BeanPreview)
-		preview.show(_bean("bv-zzzz", body="paragraph\n\n" * 200))
+		assert preview.bean.id == "bv-zzzz"
 		assert preview.is_pending
 
-		await pilot.press("ctrl+f")
-		await pilot.pause()
+		await scroll(pilot, "ctrl+f")
 		assert not preview.is_pending
-		assert preview.bean.id == "bv-zzzz"
+		# The page lands on the new document, not the one it replaced: the
+		# body mounts after a threaded parse, so a scroll taken straight after
+		# the flush paged whatever happened to be laid out -- flaky under load.
+		first_page = preview.scroll_offset.y
+		assert first_page > 0
 
 		# And the keys still move the pane once it is showing.
-		await pilot.press("ctrl+f")
-		await pilot.pause()
-		assert preview.scroll_offset.y > 0
+		await scroll(pilot, "ctrl+f")
+		assert preview.scroll_offset.y > first_page
 
-		await pilot.press("ctrl+b")
-		await pilot.pause()
-		assert preview.scroll_offset.y == 0
+		await scroll(pilot, "ctrl+b")
+		assert preview.scroll_offset.y == first_page
 
-	drive(tmp_path, scenario)
+	drive(root, scenario)
 
 
 def test_pressing_m_opens_mission_control_for_the_project(tmp_path):

@@ -51,6 +51,7 @@ from __future__ import annotations
 
 from rich.text import Text
 from textual.app import ComposeResult
+from textual.await_complete import AwaitComplete
 from textual.containers import VerticalScroll
 from textual.timer import Timer
 from textual.widgets import Markdown, Static
@@ -221,6 +222,7 @@ class BeanPreview(VerticalScroll):
 		self._shown: Bean | None = None
 		self._painted = False
 		self._timer: Timer | None = None
+		self._rendering: AwaitComplete | None = None
 		self._header = Static(classes="preview--header")
 		self._pending = Static(PENDING, classes="preview--pending")
 		self._body = Markdown()
@@ -278,17 +280,22 @@ class BeanPreview(VerticalScroll):
 			return
 		self._schedule()
 
-	def flush(self) -> None:
+	def flush(self) -> AwaitComplete:
 		"""Render a pending bean now rather than when the timer fires.
 
 		For the caller who is about to do something to the body -- scroll it,
 		or put the pane back on screen -- and would otherwise be acting on a
 		marker.
+
+		Returns the render in flight, pending or not, for a caller that must
+		act on the new document rather than the one it replaces: the parse runs
+		in a thread and the blocks mount after it, so the body is not there
+		yet when this returns. Optionally awaitable, like `Markdown.update`.
 		"""
-		if self._timer is None:
-			return
-		self._stop_timer()
-		self._apply()
+		if self._timer is not None:
+			self._stop_timer()
+			self._apply()
+		return self._rendering or AwaitComplete.nothing()
 
 	def cancel(self) -> None:
 		"""Abandon a pending render; the pane keeps whatever it already shows.
@@ -341,7 +348,7 @@ class BeanPreview(VerticalScroll):
 		# update() parses off the event loop and returns an optionally
 		# awaitable; not awaiting it here is deliberate, so that show() stays
 		# callable from a synchronous message handler.
-		self._body.update(body_markdown(self._bean))
+		self._rendering = self._body.update(body_markdown(self._bean))
 		# A new bean is a new document -- start it at the top rather than
 		# wherever the last one was left.
 		self.scroll_home(animate=False)

@@ -1312,18 +1312,18 @@ class BeansViewer(App):
 		# the refit waits a refresh for its new size.
 		self.call_after_refresh(self._refit_title)
 
-	def action_preview_scroll(self, direction: int) -> None:
+	async def action_preview_scroll(self, direction: int) -> None:
 		preview = self.query_one(BeanPreview)
 		if preview.has_class("hidden"):
 			return
 		# Someone reaching for the pane wants the body now, not in 150 ms;
 		# paging a pane that is still showing its pending marker would look
 		# like the scroll keys had stopped working.
-		preview.flush()
-		if direction > 0:
-			preview.scroll_page_down()
-		else:
-			preview.scroll_page_up()
+		await preview.flush()
+		# Mounted is not laid out: until the next refresh the pane's scroll
+		# range is still the old document's, and a page taken against it is
+		# either lost or lands mid-way down the new one.
+		preview.call_after_refresh(preview.scroll_page_down if direction > 0 else preview.scroll_page_up)
 
 	@staticmethod
 	def _matches(bean: Bean, needle: str) -> bool:
